@@ -208,23 +208,29 @@ class MainActivity : ComponentActivity(), ConnectChecker {
 
     override fun onConnectionFailed(reason: String) {
         logMessage("Connection failed: $reason")
-        runOnUiThread {
-            isStreamingState.value = false
-            encodersReady = false
-            startCameraPreview()
-            Toast.makeText(this@MainActivity, "Connection Failed: $reason", Toast.LENGTH_LONG).show()
-        }
+        Thread {
+            srtCamera2?.stopStream()
+            runOnUiThread {
+                isStreamingState.value = false
+                encodersReady = false
+                startCameraPreview()
+                Toast.makeText(this@MainActivity, "Connection Failed: $reason", Toast.LENGTH_LONG).show()
+            }
+        }.start()
     }
 
     override fun onNewBitrate(bitrate: Long) {}
 
     override fun onDisconnect() {
         logMessage("Disconnected from server.")
-        runOnUiThread {
-            isStreamingState.value = false
-            encodersReady = false
-            startCameraPreview()
-        }
+        Thread {
+            srtCamera2?.stopStream()
+            runOnUiThread {
+                isStreamingState.value = false
+                encodersReady = false
+                startCameraPreview()
+            }
+        }.start()
     }
 
     override fun onAuthError() { logMessage("Authentication error.") }
