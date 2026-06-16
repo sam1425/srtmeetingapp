@@ -47,8 +47,13 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.List
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.StrokeCap
 
 class MainActivity : ComponentActivity(), ConnectChecker {
 
@@ -341,194 +346,403 @@ class MainActivity : ComponentActivity(), ConnectChecker {
     }
 
     @Composable
-    fun MainScreen() {
-        var ip by remember { mutableStateOf("192.168.1.100") }
-        var port by remember { mutableStateOf("9000") }
-        var name by remember { mutableStateOf("Default") }
-        // Read directly from the stable MutableState objects — no extra remember wrapper needed
-        val isStreaming by isStreamingState
-        val isAudioEnabled by isAudioEnabledState
+    fun MicIcon(isAudioEnabled: Boolean, modifier: Modifier = Modifier) {
+        Canvas(modifier = modifier.size(24.dp)) {
+            val w = size.width
+            val h = size.height
+            val activeColor = Color.White
+            val inactiveColor = Color(0xFFF38BA8)
+            val color = if (isAudioEnabled) activeColor else inactiveColor
 
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(16.dp)
-                .verticalScroll(rememberScrollState()),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            Text(
-                text = "OBS SRT Meeting Client",
-                color = MaterialTheme.colorScheme.primary,
-                fontSize = 22.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(vertical = 8.dp)
+            // Draw microphone body (rounded rect in the middle)
+            val bodyWidth = w * 0.35f
+            val bodyHeight = h * 0.55f
+            val bodyLeft = (w - bodyWidth) / 2
+            val bodyTop = h * 0.12f
+            drawRoundRect(
+                color = color,
+                topLeft = Offset(bodyLeft, bodyTop),
+                size = Size(bodyWidth, bodyHeight),
+                cornerRadius = CornerRadius(bodyWidth / 2, bodyWidth / 2),
+                style = Stroke(width = 2.dp.toPx())
             )
-
-            // Camera preview (16:9)
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(16f / 9f)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Color.Black)
-                    .border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(12.dp))
-            ) {
-                AndroidView(
-                    factory = { openGlView!! },
-                    modifier = Modifier.fillMaxSize()
+            // Draw solid fill or inner rect for the body
+            if (isAudioEnabled) {
+                drawRoundRect(
+                    color = color.copy(alpha = 0.4f),
+                    topLeft = Offset(bodyLeft + 3.dp.toPx(), bodyTop + 3.dp.toPx()),
+                    size = Size(bodyWidth - 6.dp.toPx(), bodyHeight - 6.dp.toPx()),
+                    cornerRadius = CornerRadius((bodyWidth - 6.dp.toPx()) / 2, (bodyWidth - 6.dp.toPx()) / 2)
                 )
             }
 
-            // Input fields
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                shape = RoundedCornerShape(12.dp)
+            // Draw cradle (semi-circle around bottom)
+            val cradleRadius = w * 0.28f
+            drawArc(
+                color = color,
+                startAngle = 0f,
+                sweepAngle = 180f,
+                useCenter = false,
+                topLeft = Offset(w / 2 - cradleRadius, h * 0.35f),
+                size = Size(cradleRadius * 2, cradleRadius * 2),
+                style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round)
+            )
+
+            // Draw stand (vertical line down from cradle)
+            drawLine(
+                color = color,
+                start = Offset(w / 2, h * 0.35f + cradleRadius * 2),
+                end = Offset(w / 2, h * 0.88f),
+                strokeWidth = 2.dp.toPx(),
+                cap = StrokeCap.Round
+            )
+
+            // Draw base (horizontal line at the bottom)
+            val baseWidth = w * 0.3f
+            drawLine(
+                color = color,
+                start = Offset(w / 2 - baseWidth / 2, h * 0.88f),
+                end = Offset(w / 2 + baseWidth / 2, h * 0.88f),
+                strokeWidth = 2.dp.toPx(),
+                cap = StrokeCap.Round
+            )
+
+            // Draw slash if muted
+            if (!isAudioEnabled) {
+                drawLine(
+                    color = inactiveColor,
+                    start = Offset(w * 0.2f, h * 0.2f),
+                    end = Offset(w * 0.8f, h * 0.8f),
+                    strokeWidth = 2.dp.toPx(),
+                    cap = StrokeCap.Round
+                )
+            }
+        }
+    }
+
+    @Composable
+    fun MainScreen() {
+        var ip by rememberSaveable { mutableStateOf("192.168.1.100") }
+        var port by rememberSaveable { mutableStateOf("9000") }
+        var name by rememberSaveable { mutableStateOf("Default") }
+
+        var showConfigDialog by remember { mutableStateOf(false) }
+        var showLogsDialog by remember { mutableStateOf(false) }
+
+        val isStreaming by isStreamingState
+        val isAudioEnabled by isAudioEnabledState
+
+        val configuration = LocalConfiguration.current
+        val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ) {
+            // Fullscreen OpenGL preview
+            AndroidView(
+                factory = { openGlView!! },
+                modifier = Modifier.fillMaxSize()
+            )
+
+            // HUD Overlays
+            // 1. Live Indicator (Top Start / Left)
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(16.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color.Black.copy(alpha = 0.6f))
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(if (isStreaming) Color(0xFFE24B4A) else Color(0xFFBAC2DE))
+                )
+                Text(
+                    text = if (isStreaming) "LIVE" else "STANDBY",
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+
+            // 2. Stream URL info (Top End / Right)
+            if (isStreaming) {
+                Text(
+                    text = "$ip:$port/$name",
+                    color = Color.White.copy(alpha = 0.8f),
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(16.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color.Black.copy(alpha = 0.6f))
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                )
+            }
+
+            // 3. Control Panel (Bottom Row for Portrait, Right Column for Landscape)
+            if (isLandscape) {
                 Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .fillMaxHeight()
+                        .width(88.dp)
+                        .background(Color.Black.copy(alpha = 0.5f))
+                        .padding(vertical = 24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.SpaceEvenly
                 ) {
-                    OutlinedTextField(
-                        value = ip,
-                        onValueChange = { if (!isStreaming) ip = it },
-                        label = { Text("Broadcaster IP") },
-                        enabled = !isStreaming,
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = MaterialTheme.colorScheme.primary,
-                            unfocusedBorderColor = Color(0xFF45475A)
-                        )
-                    )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    IconButton(
+                        onClick = { showConfigDialog = true },
+                        modifier = Modifier.size(48.dp)
                     ) {
-                        OutlinedTextField(
-                            value = port,
-                            onValueChange = { if (!isStreaming) port = it },
-                            label = { Text("SRT Port") },
-                            enabled = !isStreaming,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            modifier = Modifier.weight(1f),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = MaterialTheme.colorScheme.primary,
-                                unfocusedBorderColor = Color(0xFF45475A)
-                            )
+                        Icon(
+                            imageVector = Icons.Default.Settings,
+                            contentDescription = "Settings",
+                            tint = MaterialTheme.colorScheme.primary
                         )
-                        OutlinedTextField(
-                            value = name,
-                            onValueChange = { if (!isStreaming) name = it },
-                            label = { Text("Display Name") },
-                            enabled = !isStreaming,
-                            modifier = Modifier.weight(2f),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = MaterialTheme.colorScheme.primary,
-                                unfocusedBorderColor = Color(0xFF45475A)
-                            )
+                    }
+
+                    IconButton(
+                        onClick = { toggleAudio() },
+                        modifier = Modifier.size(48.dp)
+                    ) {
+                        MicIcon(isAudioEnabled = isAudioEnabled)
+                    }
+
+                    RecordButton(
+                        isStreaming = isStreaming,
+                        onClick = { toggleStream(ip, port, name) }
+                    )
+
+                    IconButton(
+                        onClick = { switchCamera() },
+                        modifier = Modifier.size(48.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "Switch Camera",
+                            tint = Color.White
+                        )
+                    }
+
+                    IconButton(
+                        onClick = { showLogsDialog = true },
+                        modifier = Modifier.size(48.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.List,
+                            contentDescription = "Connection Logs",
+                            tint = MaterialTheme.colorScheme.secondary
+                        )
+                    }
+                }
+            } else {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .height(100.dp)
+                        .background(Color.Black.copy(alpha = 0.5f))
+                        .padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceEvenly
+                ) {
+                    IconButton(
+                        onClick = { showConfigDialog = true },
+                        modifier = Modifier.size(48.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Settings,
+                            contentDescription = "Settings",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+
+                    IconButton(
+                        onClick = { toggleAudio() },
+                        modifier = Modifier.size(48.dp)
+                    ) {
+                        MicIcon(isAudioEnabled = isAudioEnabled)
+                    }
+
+                    RecordButton(
+                        isStreaming = isStreaming,
+                        onClick = { toggleStream(ip, port, name) }
+                    )
+
+                    IconButton(
+                        onClick = { switchCamera() },
+                        modifier = Modifier.size(48.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "Switch Camera",
+                            tint = Color.White
+                        )
+                    }
+
+                    IconButton(
+                        onClick = { showLogsDialog = true },
+                        modifier = Modifier.size(48.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.List,
+                            contentDescription = "Connection Logs",
+                            tint = MaterialTheme.colorScheme.secondary
                         )
                     }
                 }
             }
-            RecordButton(
-                isStreaming = isStreaming,
-                onClick = { toggleStream(ip, port, name) },
-                modifier = Modifier.align(Alignment.CenterHorizontally)
-            )
-            // Action buttons — single row, single connect button
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Button(
-                    onClick = { toggleStream(ip, port, name) },
-                    modifier = Modifier.weight(1.5f),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (isStreaming) Color(0xFFF38BA8) else Color(0xFFA6E3A1),
-                        contentColor = Color(0xFF11111B)
-                    ),
-                    shape = RoundedCornerShape(8.dp)
-                ) {
-                    Text(
-                        text = if (isStreaming) "Disconnect" else "Connect",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 15.sp
-                    )
-                }
+        }
 
-                Button(
-                    onClick = { switchCamera() },
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFF45475A),
-                        contentColor = MaterialTheme.colorScheme.onBackground
-                    ),
-                    shape = RoundedCornerShape(8.dp)
-                ) {
-                    Text("Switch Cam", fontSize = 13.sp)
-                }
-
-                Button(
-                    onClick = { toggleAudio() },
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (isAudioEnabled) Color(0xFF89B4FA) else Color(0xFFF38BA8),
-                        contentColor = Color(0xFF11111B)
-                    ),
-                    shape = RoundedCornerShape(8.dp)
-                ) {
-                    Text(if (isAudioEnabled) "Mute Mic" else "Unmute Mic", fontSize = 13.sp)
-                }
-            }
-
-            // Logs
-            Text(
-                text = "Connection Logs & Diagnostics",
-                color = MaterialTheme.colorScheme.secondary,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.align(Alignment.Start)
-            )
-
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(180.dp)
-                    .background(Color(0xFF181825), RoundedCornerShape(8.dp))
-                    .border(1.dp, Color(0xFF313244), RoundedCornerShape(8.dp))
-                    .padding(8.dp)
-            ) {
-                val scrollState = rememberScrollState()
-                LaunchedEffect(logs.size) {
-                    if (logs.isNotEmpty()) scrollState.scrollTo(scrollState.maxValue)
-                }
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .verticalScroll(scrollState),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    if (logs.isEmpty()) {
-                        Text(
-                            text = "Ready. Configure broadcaster connection and tap Connect.",
-                            color = Color(0xFF7F849C),
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 12.sp
+        // Configuration Dialog Popup
+        if (showConfigDialog) {
+            AlertDialog(
+                onDismissRequest = { showConfigDialog = false },
+                title = { Text("Connection Settings", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold) },
+                text = {
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = ip,
+                            onValueChange = { if (!isStreaming) ip = it },
+                            label = { Text("Broadcaster IP") },
+                            enabled = !isStreaming,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = MaterialTheme.colorScheme.primary,
+                                unfocusedBorderColor = Color(0xFF45475A)
+                            )
                         )
-                    } else {
-                        logs.forEach { log ->
-                            Text(
-                                text = log,
-                                color = Color(0xFFA6E3A1),
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 12.sp
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            OutlinedTextField(
+                                value = port,
+                                onValueChange = { if (!isStreaming) port = it },
+                                label = { Text("SRT Port") },
+                                enabled = !isStreaming,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.weight(1f),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = MaterialTheme.colorScheme.primary,
+                                    unfocusedBorderColor = Color(0xFF45475A)
+                                )
+                            )
+                            OutlinedTextField(
+                                value = name,
+                                onValueChange = { if (!isStreaming) name = it },
+                                label = { Text("Display Name") },
+                                enabled = !isStreaming,
+                                modifier = Modifier.weight(2f),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = MaterialTheme.colorScheme.primary,
+                                    unfocusedBorderColor = Color(0xFF45475A)
+                                )
                             )
                         }
                     }
-                }
-            }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = { showConfigDialog = false },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = Color(0xFF11111B)
+                        )
+                    ) {
+                        Text("Done", fontWeight = FontWeight.Bold)
+                    }
+                },
+                containerColor = MaterialTheme.colorScheme.surface,
+                shape = RoundedCornerShape(16.dp)
+            )
+        }
+
+        // Diagnostics Log Dialog Popup
+        if (showLogsDialog) {
+            AlertDialog(
+                onDismissRequest = { showLogsDialog = false },
+                title = { Text("Diagnostics & Logs", color = MaterialTheme.colorScheme.secondary, fontWeight = FontWeight.Bold) },
+                text = {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(280.dp)
+                                .background(Color(0xFF181825), RoundedCornerShape(8.dp))
+                                .border(1.dp, Color(0xFF313244), RoundedCornerShape(8.dp))
+                                .padding(8.dp)
+                        ) {
+                            val scrollState = rememberScrollState()
+                            LaunchedEffect(logs.size) {
+                                if (logs.isNotEmpty()) scrollState.scrollTo(scrollState.maxValue)
+                            }
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .verticalScroll(scrollState),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                if (logs.isEmpty()) {
+                                    Text(
+                                        text = "Ready. Configure connection parameters and start streaming.",
+                                        color = Color(0xFF7F849C),
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 12.sp
+                                    )
+                                } else {
+                                    logs.forEach { log ->
+                                        Text(
+                                            text = log,
+                                            color = Color(0xFFA6E3A1),
+                                            fontFamily = FontFamily.Monospace,
+                                            fontSize = 12.sp
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        TextButton(
+                            onClick = { logs.clear() },
+                            colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFFF38BA8))
+                        ) {
+                            Text("Clear Logs")
+                        }
+                        Button(
+                            onClick = { showLogsDialog = false },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.secondary,
+                                contentColor = Color(0xFF11111B)
+                            )
+                        ) {
+                            Text("Close", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                },
+                containerColor = MaterialTheme.colorScheme.surface,
+                shape = RoundedCornerShape(16.dp)
+            )
         }
     }
 }
