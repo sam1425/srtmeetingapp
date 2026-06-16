@@ -1,0 +1,7 @@
+<resources>
+    <!-- We use the standard platform Theme.DeviceDefault.NoActionBar for maximum compatibility -->
+    <style name="Theme.srtmeetingapp" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:statusBarColor">#121212</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>
