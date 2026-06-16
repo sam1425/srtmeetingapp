@@ -62,6 +62,10 @@ class MainActivity : ComponentActivity(), ConnectChecker {
     private var isSurfaceReady = false
     private var encodersReady = false
 
+    private var videoWidth = 1280
+    private var videoHeight = 720
+    private var videoBitrate = 2000 * 1024
+
     private val isStreamingState = mutableStateOf(false)
     private val isAudioEnabledState = mutableStateOf(true)
     private val logs = mutableStateListOf<String>()
@@ -162,9 +166,9 @@ class MainActivity : ComponentActivity(), ConnectChecker {
     }
 
     private fun prepareEncoders(): Boolean {
-        if (srtCamera2?.prepareVideo(1280, 720, 30, 2000 * 1024, 0) == true &&
+        if (srtCamera2?.prepareVideo(videoWidth, videoHeight, 30, videoBitrate, 0) == true &&
             srtCamera2?.prepareAudio(128 * 1024, 44100, true, true, true) == true) {
-                logMessage("Encoders ready.")
+                logMessage("Encoders ready: ${videoWidth}x${videoHeight} @ ${videoBitrate / 1024} Kbps.")
                 return true
             }
         logMessage("Failed to prepare encoders.")
@@ -432,6 +436,9 @@ class MainActivity : ComponentActivity(), ConnectChecker {
         var ip by rememberSaveable { mutableStateOf("192.168.1.100") }
         var port by rememberSaveable { mutableStateOf("9000") }
         var name by rememberSaveable { mutableStateOf("Default") }
+        var selectedProfile by rememberSaveable { mutableStateOf(
+            if (videoWidth == 1280) "High" else if (videoWidth == 854) "Medium" else "Low"
+        ) }
 
         var showConfigDialog by remember { mutableStateOf(false) }
         var showLogsDialog by remember { mutableStateOf(false) }
@@ -657,6 +664,54 @@ class MainActivity : ComponentActivity(), ConnectChecker {
                                     unfocusedBorderColor = Color(0xFF45475A)
                                 )
                             )
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text("Video Quality Profile (Unstable Networks)", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            val profiles = listOf("High", "Medium", "Low")
+                            profiles.forEach { profile ->
+                                val isSelected = selectedProfile == profile
+                                val containerColor = if (isSelected) MaterialTheme.colorScheme.primary else Color(0xFF313244)
+                                val contentColor = if (isSelected) Color(0xFF11111B) else Color(0xFFCDD6F4)
+                                Button(
+                                    onClick = { 
+                                        if (!isStreaming) {
+                                            selectedProfile = profile
+                                            when (profile) {
+                                                "High" -> {
+                                                    videoWidth = 1280
+                                                    videoHeight = 720
+                                                    videoBitrate = 2000 * 1024
+                                                }
+                                                "Medium" -> {
+                                                    videoWidth = 854
+                                                    videoHeight = 480
+                                                    videoBitrate = 1000 * 1024
+                                                }
+                                                "Low" -> {
+                                                    videoWidth = 640
+                                                    videoHeight = 360
+                                                    videoBitrate = 500 * 1024
+                                                }
+                                            }
+                                            encodersReady = false
+                                            logMessage("Selected profile: $profile (${videoWidth}x${videoHeight}, ${videoBitrate / 1024} Kbps)")
+                                        }
+                                    },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = containerColor,
+                                        contentColor = contentColor
+                                    ),
+                                    modifier = Modifier.weight(1f),
+                                    contentPadding = PaddingValues(vertical = 4.dp),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Text(profile, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
                         }
                     }
                 },

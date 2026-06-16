@@ -13,6 +13,7 @@ Copyright (C) 2026 Antigravity Team
 #include <vector>
 #include <string>
 #include <map>
+#include <set>
 #include <memory>
 #include <atomic>
 #include <sstream>
@@ -28,12 +29,37 @@ Copyright (C) 2026 Antigravity Team
 #include <arpa/inet.h>
 #endif
 
+// Qt Headers
+#include <QMainWindow>
+#include <QDockWidget>
+#include <QWidget>
+#include <QVBoxLayout>
+#include <QLabel>
+#include <QRadioButton>
+#include <QButtonGroup>
+#include <QListWidget>
+
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
 
 // Forward declaration of OBS API helper functions
 void create_obs_srt_source(const std::string& name, int port);
 void remove_obs_srt_source(const std::string& name);
+void update_participants_list_ui();
+
+// Static UI Globals
+static std::atomic<bool> s_automatic_mode{true};
+static QListWidget *s_participants_list{nullptr};
+static QDockWidget *s_dock_widget{nullptr};
+
+// Static Port Allocation Globals
+static std::mutex s_ports_mutex;
+static std::set<int> s_allocated_ports;
+
+static void release_loopback_port(int port) {
+    std::lock_guard<std::mutex> lock(s_ports_mutex);
+    s_allocated_ports.erase(port);
+}
 
 // Simple struct to track dynamic participant streams
 struct Participant {
@@ -50,6 +76,15 @@ class SRTBroker {
 public:
     SRTBroker() : running(false), listener_socket(SRT_INVALID_SOCK) {}
     ~SRTBroker() { stop(); }
+
+    std::vector<std::string> get_active_participant_names() {
+        std::lock_guard<std::mutex> lock(participants_mutex);
+        std::vector<std::string> names;
+        for (const auto& pair : participants) {
+            names.push_back(pair.first);
+        }
+        return names;
+    }
 
     bool start(int port) {
         if (running) return true;
@@ -108,16 +143,17 @@ public:
         }
 
         // Clean up all active participants
-        std::vector<std::string> participant_names;
+        std::vector<std::shared_ptr<Participant>> active_list;
         {
             std::lock_guard<std::mutex> lock(participants_mutex);
             for (auto& pair : participants) {
-                participant_names.push_back(pair.first);
+                active_list.push_back(pair.second);
             }
+            participants.clear();
         }
 
-        for (const auto& name : participant_names) {
-            cleanup_participant(name);
+        for (auto& p : active_list) {
+            cleanup_participant(p);
         }
 
         srt_cleanup();
@@ -154,6 +190,12 @@ private:
             if (stream_id_str.rfind(prefix, 0) == 0) {
                 std::string username = stream_id_str.substr(prefix.length());
                 
+                // Strip query parameters if present (e.g., ?latency=120000)
+                size_t query_pos = username.find_first_of("?;");
+                if (query_pos != std::string::npos) {
+                    username = username.substr(0, query_pos);
+                }
+
                 // Sanitize username (alphanumeric and underscores only)
                 for (char& c : username) {
                     if (!isalnum(static_cast<unsigned char>(c)) && c != '_') {
@@ -190,6 +232,7 @@ private:
         if (loopback_listener == SRT_INVALID_SOCK) {
             obs_log(LOG_ERROR, "Failed to create loopback listener socket: %s", srt_getlasterror_str());
             srt_close(client_sock);
+            release_loopback_port(loopback_port);
             return;
         }
 
@@ -206,6 +249,7 @@ private:
             obs_log(LOG_ERROR, "Failed to bind loopback listener to port %d: %s", loopback_port, srt_getlasterror_str());
             srt_close(loopback_listener);
             srt_close(client_sock);
+            release_loopback_port(loopback_port);
             return;
         }
 
@@ -213,6 +257,7 @@ private:
             obs_log(LOG_ERROR, "Failed to listen on loopback port %d: %s", loopback_port, srt_getlasterror_str());
             srt_close(loopback_listener);
             srt_close(client_sock);
+            release_loopback_port(loopback_port);
             return;
         }
 
@@ -230,16 +275,26 @@ private:
             auto it = participants.find(username);
             if (it != participants.end()) {
                 obs_log(LOG_INFO, "Participant %s reconnected. Cleaning up old session.", username.c_str());
-                it->second->active = false;
-                srt_close(it->second->client_socket);
-                srt_close(it->second->obs_socket);
-                srt_close(it->second->loopback_listener);
+                std::shared_ptr<Participant> old_p = it->second;
                 participants.erase(it);
+
+                // Detach the thread immediately so it doesn't terminate on destruction
+                if (old_p->relay_thread && old_p->relay_thread->joinable()) {
+                    old_p->relay_thread->detach();
+                }
+
+                old_p->active = false;
+                if (old_p->client_socket != SRT_INVALID_SOCK) srt_close(old_p->client_socket);
+                if (old_p->obs_socket != SRT_INVALID_SOCK) srt_close(old_p->obs_socket);
+                if (old_p->loopback_listener != SRT_INVALID_SOCK) srt_close(old_p->loopback_listener);
+
+                release_loopback_port(old_p->loopback_port);
             }
             participants[username] = participant;
         }
 
         obs_log(LOG_INFO, "Registered participant: %s, assigned local loopback port %d", username.c_str(), loopback_port);
+        update_participants_list_ui();
 
         // Tell OBS to create the source pointing to our loopback listener
         create_obs_srt_source(username, loopback_port);
@@ -248,34 +303,26 @@ private:
         sockaddr_in obs_addr;
         int addr_len = sizeof(obs_addr);
         
-        // Wait for OBS to connect (with a 5s timeout)
-        int timeout_ms = 5000;
+        // Wait for OBS to connect (with a 10s timeout)
+        int timeout_ms = 10000;
         srt_setsockopt(loopback_listener, 0, SRTO_RCVTIMEO, &timeout_ms, sizeof(timeout_ms));
         
         SRTSOCKET obs_sock = srt_accept(loopback_listener, (struct sockaddr*)&obs_addr, &addr_len);
         if (obs_sock == SRT_INVALID_SOCK) {
             obs_log(LOG_ERROR, "OBS failed to connect to loopback listener on port %d: %s", loopback_port, srt_getlasterror_str());
-            cleanup_participant(username);
+            cleanup_participant(participant);
             return;
         }
 
         participant->obs_socket = obs_sock;
 
         // Start relay thread
-        participant->relay_thread = std::make_unique<std::thread>(&SRTBroker::relay_loop, this, username);
+        participant->relay_thread = std::make_unique<std::thread>(&SRTBroker::relay_loop, this, participant);
     }
 
-    void relay_loop(std::string username) {
-        std::shared_ptr<Participant> p;
-        {
-            std::lock_guard<std::mutex> lock(participants_mutex);
-            auto it = participants.find(username);
-            if (it == participants.end()) return;
-            p = it->second;
-        }
-
+    void relay_loop(std::shared_ptr<Participant> p) {
         char buffer[1316]; // SRT standard packet size (MPEG-TS payloads fit in 1316 bytes)
-        obs_log(LOG_INFO, "Starting SRT relay loop for %s", username.c_str());
+        obs_log(LOG_INFO, "Starting SRT relay loop for %s", p->name.c_str());
 
         // Set non-blocking/recv timeout to check for active state periodically
         int timeout_ms = 500;
@@ -289,47 +336,55 @@ private:
                 if (err == SRT_EASYNCRCV || err == SRT_ETIMEOUT) { // Timeout, loop and check active state
                     continue;
                 }
-                obs_log(LOG_INFO, "Client socket read error for %s: %s", username.c_str(), srt_getlasterror_str());
+                obs_log(LOG_INFO, "Client socket read error for %s: %s", p->name.c_str(), srt_getlasterror_str());
                 break;
             }
 
             if (bytes_read == 0) {
-                obs_log(LOG_INFO, "Client disconnected (EOF) for %s", username.c_str());
+                obs_log(LOG_INFO, "Client disconnected (EOF) for %s", p->name.c_str());
                 break;
             }
 
             // Write to OBS loopback
             int bytes_written = srt_sendmsg(p->obs_socket, buffer, bytes_read, -1, 0);
             if (bytes_written == SRT_ERROR) {
-                obs_log(LOG_WARNING, "Failed to write to OBS loopback for %s: %s", username.c_str(), srt_getlasterror_str());
+                obs_log(LOG_WARNING, "Failed to write to OBS loopback for %s: %s", p->name.c_str(), srt_getlasterror_str());
                 break;
             }
         }
 
-        obs_log(LOG_INFO, "Stopping SRT relay loop for %s", username.c_str());
-        cleanup_participant(username);
+        obs_log(LOG_INFO, "Stopping SRT relay loop for %s", p->name.c_str());
+        cleanup_participant(p);
     }
 
-    void cleanup_participant(const std::string& name) {
-        std::shared_ptr<Participant> p;
+    void cleanup_participant(std::shared_ptr<Participant> p) {
+        if (!p) return;
+
+        bool was_in_map = false;
         {
             std::lock_guard<std::mutex> lock(participants_mutex);
-            auto it = participants.find(name);
-            if (it == participants.end()) return;
-            p = it->second;
-            p->active = false;
-            participants.erase(it);
+            auto it = participants.find(p->name);
+            if (it != participants.end() && it->second == p) {
+                participants.erase(it);
+                was_in_map = true;
+            }
         }
+
+        release_loopback_port(p->loopback_port);
+        p->active = false;
 
         // Close sockets
         if (p->client_socket != SRT_INVALID_SOCK) {
             srt_close(p->client_socket);
+            p->client_socket = SRT_INVALID_SOCK;
         }
         if (p->obs_socket != SRT_INVALID_SOCK) {
             srt_close(p->obs_socket);
+            p->obs_socket = SRT_INVALID_SOCK;
         }
         if (p->loopback_listener != SRT_INVALID_SOCK) {
             srt_close(p->loopback_listener);
+            p->loopback_listener = SRT_INVALID_SOCK;
         }
 
         // Join or detach the relay thread
@@ -341,29 +396,29 @@ private:
             }
         }
 
-        // Remove source from OBS
-        remove_obs_srt_source(name);
-        obs_log(LOG_INFO, "Cleaned up participant %s", name.c_str());
+        if (was_in_map) {
+            update_participants_list_ui();
+            // Remove source from OBS only if automatic mode is enabled
+            if (s_automatic_mode.load()) {
+                remove_obs_srt_source(p->name);
+            } else {
+                obs_log(LOG_INFO, "Static mode enabled: Keeping source 'SRT - %s' on disconnect", p->name.c_str());
+            }
+        }
+        obs_log(LOG_INFO, "Cleaned up participant session %s", p->name.c_str());
     }
 
     int find_free_loopback_port() {
-        static std::atomic<int> next_port(10000);
+        std::lock_guard<std::mutex> lock(s_ports_mutex);
+        static int next_port = 10000;
         for (int i = 0; i < 100; ++i) {
             int port = next_port++;
             if (next_port >= 10100) next_port = 10000;
 
-            // Check if already in use
-            bool in_use = false;
-            {
-                std::lock_guard<std::mutex> lock(participants_mutex);
-                for (const auto& pair : participants) {
-                    if (pair.second->loopback_port == port) {
-                        in_use = true;
-                        break;
-                    }
-                }
+            if (s_allocated_ports.find(port) == s_allocated_ports.end()) {
+                s_allocated_ports.insert(port);
+                return port;
             }
-            if (!in_use) return port;
         }
         return -1;
     }
@@ -379,10 +434,107 @@ private:
 // Global broker instance
 static SRTBroker s_broker;
 
+static void update_participants_list_ui_task(void *param) {
+    if (!s_participants_list) return;
+    s_participants_list->clear();
+    std::vector<std::string> names = s_broker.get_active_participant_names();
+    for (const auto& name : names) {
+        s_participants_list->addItem(QString::fromStdString(name));
+    }
+    (void)param;
+}
+
+void update_participants_list_ui() {
+    obs_queue_task(OBS_TASK_UI, update_participants_list_ui_task, nullptr, false);
+}
+
+static void setup_plugin_dock() {
+    QMainWindow *main_window = static_cast<QMainWindow *>(obs_frontend_get_main_window());
+    if (!main_window) {
+        obs_log(LOG_WARNING, "OBS main window not found, cannot create dock");
+        return;
+    }
+
+    s_dock_widget = new QDockWidget("SRT Meeting Control", main_window);
+    s_dock_widget->setObjectName("srtMeetingControlDock");
+
+    QWidget *content = new QWidget(s_dock_widget);
+    QVBoxLayout *layout = new QVBoxLayout(content);
+    layout->setContentsMargins(12, 12, 12, 12);
+    layout->setSpacing(10);
+
+    // Section 1: Mode Selection
+    QLabel *mode_label = new QLabel("<b>Orchestration Mode</b>", content);
+    mode_label->setStyleSheet("font-size: 13px; color: #bac2de;");
+    layout->addWidget(mode_label);
+
+    QRadioButton *auto_btn = new QRadioButton("Automatic Mode (Dynamic Sources)", content);
+    auto_btn->setToolTip("Automatically creates OBS source when client connects, and deletes it when they disconnect.");
+    auto_btn->setChecked(s_automatic_mode.load());
+    layout->addWidget(auto_btn);
+
+    QRadioButton *static_btn = new QRadioButton("Static Mode (Persistent Sources)", content);
+    static_btn->setToolTip("Creates OBS source on first connection, but keeps it when they disconnect. Updates source settings if they reconnect.");
+    static_btn->setChecked(!s_automatic_mode.load());
+    layout->addWidget(static_btn);
+
+    QButtonGroup *group = new QButtonGroup(content);
+    group->addButton(auto_btn, 0);
+    group->addButton(static_btn, 1);
+
+    QObject::connect(group, &QButtonGroup::idClicked, [](int id) {
+        s_automatic_mode.store(id == 0);
+        obs_log(LOG_INFO, "Connection Mode changed to: %s", (id == 0) ? "Automatic" : "Static");
+    });
+
+    // Spacer
+    layout->addSpacing(8);
+
+    // Section 2: Active Participants
+    QLabel *list_label = new QLabel("<b>Active Participants</b>", content);
+    list_label->setStyleSheet("font-size: 13px; color: #bac2de;");
+    layout->addWidget(list_label);
+
+    s_participants_list = new QListWidget(content);
+    s_participants_list->setToolTip("List of currently streaming participants.");
+    s_participants_list->setStyleSheet(
+        "background-color: rgb(30, 30, 46);"
+        "color: rgb(166, 227, 161);"
+        "border: 1px solid rgb(49, 50, 68);"
+        "border-radius: 6px;"
+        "padding: 5px;"
+    );
+    layout->addWidget(s_participants_list);
+
+    // Section 3: Connection Info Helper
+    QLabel *info_label = new QLabel("SRT Broker Listening on UDP port <b>9000</b>", content);
+    info_label->setAlignment(Qt::AlignCenter);
+    info_label->setStyleSheet("color: rgb(180, 190, 254); font-size: 11px; margin-top: 4px;");
+    layout->addWidget(info_label);
+
+    content->setLayout(layout);
+    s_dock_widget->setWidget(content);
+
+    obs_frontend_add_custom_qdock("srtMeetingControlDock", s_dock_widget);
+    main_window->addDockWidget(Qt::RightDockWidgetArea, s_dock_widget);
+    s_dock_widget->show();
+    obs_log(LOG_INFO, "SRT Meeting UI dock registered successfully");
+}
+
+static void obssrt_frontend_event(enum obs_frontend_event event, void *private_data) {
+    if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
+        setup_plugin_dock();
+    }
+    (void)private_data;
+}
+
 bool obs_module_load(void)
 {
     obs_log(LOG_INFO, "SRT Meeting plugin loaded successfully (version %s)", PLUGIN_VERSION);
     
+    // Register frontend event callback to create dock once UI is loaded
+    obs_frontend_add_event_callback(obssrt_frontend_event, nullptr);
+
     // Start SRT broker on port 9000
     if (!s_broker.start(9000)) {
         obs_log(LOG_ERROR, "Failed to start SRT broker");
@@ -394,6 +546,11 @@ bool obs_module_load(void)
 
 void obs_module_unload(void)
 {
+    obs_frontend_remove_event_callback(obssrt_frontend_event, nullptr);
+    if (s_dock_widget) {
+        obs_frontend_remove_dock("srtMeetingControlDock");
+        s_dock_widget = nullptr;
+    }
     s_broker.stop();
     obs_log(LOG_INFO, "SRT Meeting plugin unloaded");
 }
@@ -430,7 +587,8 @@ void create_obs_srt_source_task(void *param) {
             // Check if source already exists
             obs_source_t *existing_source = obs_get_source_by_name(source_name.c_str());
             if (existing_source) {
-                obs_log(LOG_INFO, "Source '%s' already exists in OBS, skipping creation", source_name.c_str());
+                obs_log(LOG_INFO, "Source '%s' already exists in OBS, updating settings with new port %d", source_name.c_str(), data->port);
+                obs_source_update(existing_source, settings);
                 obs_source_release(existing_source);
             } else {
                 // Create native Media Source
