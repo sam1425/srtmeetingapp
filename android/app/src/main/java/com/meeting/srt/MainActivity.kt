@@ -207,6 +207,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
         runOnUiThread {
             isStreamingState.value = false
             encodersReady = false
+            startCameraPreview()
             Toast.makeText(this@MainActivity, "Connection Failed: $reason", Toast.LENGTH_LONG).show()
         }
     }
@@ -218,6 +219,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
         runOnUiThread {
             isStreamingState.value = false
             encodersReady = false
+            startCameraPreview()
         }
     }
 
@@ -231,7 +233,12 @@ class MainActivity : ComponentActivity(), ConnectChecker {
             logMessage("Stopping stream...")
             isStreamingState.value = false
             encodersReady = false
-            Thread { srtCamera2?.stopStream() }.start()
+            Thread {
+                srtCamera2?.stopStream()
+                runOnUiThread {
+                    startCameraPreview()
+                }
+            }.start()
             return
         }
 

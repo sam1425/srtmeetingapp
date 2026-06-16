@@ -28,6 +28,11 @@ An absolute bare-bones [Quick Start Guide](https://github.com/obsproject/obs-plu
 
 All documentation can be found in the [Plugin Template Wiki](https://github.com/obsproject/obs-plugintemplate/wiki).
 
+### Project Specifications
+* [OBS SRT Meeting Specification](docs/obs_srt_meeting_specification.md) - Main system design, connection scheme, and OBS integration.
+* [Android Client Specification](docs/android_client_specification.md) - Android App setup, technologies, and dark-theme style design system.
+* [UI Design Updates](docs/design_updates.md) - Detailed design of the record button animations and responsive screen layouts.
+
 Suggested reading to get up and running:
 
 * [Getting started](https://github.com/obsproject/obs-plugintemplate/wiki/Getting-Started)

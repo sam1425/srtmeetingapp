@@ -16,6 +16,7 @@
 !LICENSE
 !README.md
 !android
+!/docs
 # Exclude lock files
 *.lock.json
 
