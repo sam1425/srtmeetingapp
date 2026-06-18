@@ -35,12 +35,12 @@ TRAPZERR() {
 
 build() {
   if (( ! ${+SCRIPT_HOME} )) typeset -g SCRIPT_HOME=${ZSH_ARGZERO:A:h}
-  local host_os='ubuntu'
+  local host_os='linux'
   local project_root=${SCRIPT_HOME:A:h:h}
   local buildspec_file=${project_root}/buildspec.json
 
   fpath=("${SCRIPT_HOME}/utils.zsh" ${fpath})
-  autoload -Uz log_group log_info log_error log_output set_loglevel check_ubuntu setup_ccache
+  autoload -Uz log_group log_info log_error log_output set_loglevel check_linux setup_ccache
 
   if [[ ! -r ${buildspec_file} ]] {
     log_error \
@@ -53,7 +53,7 @@ build() {
   local -i verbosity=1
   local -r _version='2.0.0'
   local -r -a _valid_targets=(
-    ubuntu-x86_64
+    linux-x86_64
   )
   local target
   local config='RelWithDebInfo'
@@ -165,8 +165,8 @@ ${_usage_host:-}"
     check_${host_os}
   }
 
-  if [[ ${host_os} == ubuntu ]] {
-    autoload -Uz setup_ubuntu && setup_ubuntu
+  if [[ ${host_os} == linux ]] {
+    autoload -Uz setup_linux && setup_linux
   }
 
   local product_name
@@ -191,7 +191,7 @@ ${_usage_host:-}"
 
     local -r _preset="${target%%-*}${CI:+-ci}"
     case ${target} {
-      ubuntu-*)
+      linux-*)
         cmake_args+=(
           --preset ${_preset}-${target##*-}
           -G "${generator}"

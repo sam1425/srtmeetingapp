@@ -56,22 +56,22 @@ runs:
         brew install --quiet zsh
         echo ::endgroup::
 
-    - name: Run Ubuntu Build
+    - name: Run Linux Build
       if: runner.os == 'Linux'
       shell: zsh --no-rcs --errexit --pipefail {0}
       working-directory: ${{ inputs.workingDirectory }}
       env:
         CCACHE_DIR: ${{ inputs.workingDirectory }}/.ccache
       run: |
-        : Run Ubuntu Build
+        : Run Linux Build
 
         local -a build_args=(
-          --target ubuntu-${{ inputs.target }}
+          --target linux-${{ inputs.target }}
           --config ${{ inputs.config }}
         )
         if (( ${+RUNNER_DEBUG} )) build_args+=(--debug)
 
-        .github/scripts/build-ubuntu ${build_args}
+        .github/scripts/build-linux ${build_args}
 
     - name: Run Windows Build
       if: runner.os == 'Windows'

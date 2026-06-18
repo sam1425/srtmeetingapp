@@ -42,8 +42,7 @@
       "generator": "Xcode",
       "cacheVariables": {
         "CMAKE_COMPILE_WARNING_AS_ERROR": true,
-        "ENABLE_CCACHE": true,
-        "ENABLE_FORMAT_CHECK": true
+        "ENABLE_CCACHE": true
       }
     },
     {
@@ -71,7 +70,7 @@
       }
     },
     {
-      "name": "ubuntu-x86_64",
+      "name": "linux-x86_64",
       "displayName": "Ubuntu x86_64",
       "description": "Build for Ubuntu x86_64",
       "inherits": ["template"],
@@ -89,15 +88,14 @@
       }
     },
     {
-      "name": "ubuntu-ci-x86_64",
-      "inherits": ["ubuntu-x86_64"],
+      "name": "linux-ci-x86_64",
+      "inherits": ["linux-x86_64"],
       "displayName": "Ubuntu x86_64 CI build",
       "description": "Build for Ubuntu x86_64 on CI",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_COMPILE_WARNING_AS_ERROR": true,
-        "ENABLE_CCACHE": true,
-        "ENABLE_FORMAT_CHECK": true
+        "ENABLE_CCACHE": true
       }
     }
   ],
@@ -131,15 +129,15 @@
       "configuration": "RelWithDebInfo"
     },
     {
-      "name": "ubuntu-x86_64",
-      "configurePreset": "ubuntu-x86_64",
+      "name": "linux-x86_64",
+      "configurePreset": "linux-x86_64",
       "displayName": "Ubuntu x86_64",
       "description": "Ubuntu build for x86_64",
       "configuration": "RelWithDebInfo"
     },
     {
-      "name": "ubuntu-ci-x86_64",
-      "configurePreset": "ubuntu-ci-x86_64",
+      "name": "linux-ci-x86_64",
+      "configurePreset": "linux-ci-x86_64",
       "displayName": "Ubuntu x86_64 CI",
       "description": "Ubuntu CI build for x86_64",
       "configuration": "RelWithDebInfo"

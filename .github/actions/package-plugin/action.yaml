@@ -88,21 +88,21 @@ runs:
         brew install --quiet zsh
         echo ::endgroup::
 
-    - name: Run Ubuntu Packaging
+    - name: Run Linux Packaging
       if: runner.os == 'Linux'
       shell: zsh --no-rcs --errexit --pipefail {0}
       working-directory: ${{ inputs.workingDirectory }}
       run: |
-        : Run Ubuntu Packaging
+        : Run Linux Packaging
         package_args=(
-          --target ubuntu-${{ inputs.target }}
+          --target linux-${{ inputs.target }}
           --config ${{ inputs.config }}
         )
         if (( ${+RUNNER_DEBUG} )) build_args+=(--debug)
 
         if [[ '${{ inputs.package }}' == 'true' ]] package_args+=(--package)
 
-        .github/scripts/package-ubuntu ${package_args}
+        .github/scripts/package-linux ${package_args}
 
     - name: Run Windows Packaging
       if: runner.os == 'Windows'

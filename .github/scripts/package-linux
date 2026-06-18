@@ -35,7 +35,7 @@ TRAPZERR() {
 
 package() {
   if (( ! ${+SCRIPT_HOME} )) typeset -g SCRIPT_HOME=${ZSH_ARGZERO:A:h}
-  local host_os='ubuntu'
+  local host_os='linux'
   local project_root=${SCRIPT_HOME:A:h:h}
   local buildspec_file=${project_root}/buildspec.json
 
@@ -52,7 +52,7 @@ package() {
   local -i verbosity=1
   local -r _version='2.0.0'
   local -r -a _valid_targets=(
-    ubuntu-x86_64
+    linux-x86_64
   )
   local target
   local config='RelWithDebInfo'
@@ -162,7 +162,7 @@ ${_usage_host:-}"
     popd
   } else {
     log_group "Archiving ${product_name}..."
-    local output_name="${product_name}-${product_version}-${target##*-}-ubuntu-gnu"
+    local output_name="${product_name}-${product_version}-${target##*-}-linux-gnu"
     local _tarflags='cJf'
     if (( _loglevel > 1 || ${+CI} )) _tarflags="v${_tarflags}"
 
