@@ -91,3 +91,19 @@ if(ENABLE_FORMAT_CHECK AND NOT WIN32)
     add_dependencies(obs-srt-meeting-client check-format)
   endif()
 endif()
+
+install(TARGETS ${CMAKE_PROJECT_NAME}
+  LIBRARY DESTINATION bin/64bit
+  RUNTIME DESTINATION bin/64bit
+)
+
+if(TARGET obs-srt-meeting-client)
+  install(TARGETS obs-srt-meeting-client
+    RUNTIME DESTINATION bin/64bit
+  )
+endif()
+
+install(DIRECTORY data/
+  DESTINATION data
+  USE_SOURCE_PERMISSIONS
+)
