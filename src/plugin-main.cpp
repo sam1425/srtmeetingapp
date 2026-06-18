@@ -52,6 +52,9 @@ static std::atomic<bool> s_automatic_mode{true};
 static QListWidget *s_participants_list{nullptr};
 static QDockWidget *s_dock_widget{nullptr};
 
+// The UDP port the SRT broker listens on
+static constexpr int BROKER_PORT = 9000;
+
 // Static Port Allocation Globals
 static std::mutex s_ports_mutex;
 static std::set<int> s_allocated_ports;
@@ -64,13 +67,21 @@ static void release_loopback_port(int port) {
 // Simple struct to track dynamic participant streams
 struct Participant {
     std::string name;
-    SRTSOCKET client_socket;
-    SRTSOCKET obs_socket;
-    int loopback_port;
-    SRTSOCKET loopback_listener;
+    std::atomic<SRTSOCKET> client_socket{SRT_INVALID_SOCK};
+    std::atomic<SRTSOCKET> obs_socket{SRT_INVALID_SOCK};
+    int loopback_port{-1};
+    std::atomic<SRTSOCKET> loopback_listener{SRT_INVALID_SOCK};
     std::unique_ptr<std::thread> relay_thread;
     std::atomic<bool> active{true};
 };
+
+// Atomically close an SRT socket exactly once, preventing double-close races
+static void close_srt_socket_once(std::atomic<SRTSOCKET> &sock) {
+    SRTSOCKET s = sock.exchange(SRT_INVALID_SOCK);
+    if (s != SRT_INVALID_SOCK) {
+        srt_close(s);
+    }
+}
 
 class SRTBroker {
 public:
@@ -142,6 +153,17 @@ public:
             listener_thread.reset();
         }
 
+        // Join all handler threads (handle_new_publisher threads)
+        {
+            std::lock_guard<std::mutex> lock(handler_threads_mutex);
+            for (auto &t : handler_threads) {
+                if (t.joinable()) {
+                    t.join();
+                }
+            }
+            handler_threads.clear();
+        }
+
         // Clean up all active participants
         std::vector<std::shared_ptr<Participant>> active_list;
         {
@@ -162,6 +184,7 @@ public:
 
 private:
     void listen_loop() {
+      try {
         while (running) {
             sockaddr_in client_addr;
             int addr_len = sizeof(client_addr);
@@ -209,16 +232,57 @@ private:
                     continue;
                 }
 
-                // Launch handling on a detached thread to not block incoming connections
-                std::thread(&SRTBroker::handle_new_publisher, this, username, client_sock).detach();
+                // Launch handling on a tracked thread to not block incoming connections
+                {
+                    std::lock_guard<std::mutex> lock(handler_threads_mutex);
+                    // Prune finished handler threads before adding a new one
+                    for (auto it = handler_threads.begin(); it != handler_threads.end(); ) {
+                        if (!it->joinable()) {
+                            it = handler_threads.erase(it);
+                        } else {
+                            ++it;
+                        }
+                    }
+                    handler_threads.emplace_back(&SRTBroker::handle_new_publisher, this, username, client_sock);
+                }
             } else {
                 obs_log(LOG_WARNING, "Invalid StreamID. Expected 'publish:<name>', got '%s'", stream_id);
                 srt_close(client_sock);
             }
         }
+      } catch (const std::exception &e) {
+          obs_log(LOG_ERROR, "Exception in listen_loop: %s", e.what());
+      } catch (...) {
+          obs_log(LOG_ERROR, "Unknown exception in listen_loop");
+      }
     }
 
     void handle_new_publisher(std::string username, SRTSOCKET client_sock) {
+      try {
+        std::shared_ptr<Participant> old_p;
+        {
+            std::lock_guard<std::mutex> lock(participants_mutex);
+            auto it = participants.find(username);
+            if (it != participants.end()) {
+                old_p = it->second;
+                participants.erase(it); // Erase old one from map so cleanup_participant knows it was replaced
+            }
+        }
+
+        if (old_p) {
+            obs_log(LOG_INFO, "Participant %s reconnected. Cleaning up old session.", username.c_str());
+            old_p->active = false;
+
+            // Close sockets so the old relay_loop unblocks and exits
+            close_srt_socket_once(old_p->client_socket);
+            close_srt_socket_once(old_p->obs_socket);
+            close_srt_socket_once(old_p->loopback_listener);
+
+            if (old_p->relay_thread && old_p->relay_thread->joinable()) {
+                old_p->relay_thread->join();
+            }
+        }
+
         // Find a dynamic loopback port
         int loopback_port = find_free_loopback_port();
         if (loopback_port < 0) {
@@ -264,32 +328,13 @@ private:
         // Register participant
         auto participant = std::make_shared<Participant>();
         participant->name = username;
-        participant->client_socket = client_sock;
+        participant->client_socket.store(client_sock);
         participant->loopback_port = loopback_port;
-        participant->loopback_listener = loopback_listener;
-        participant->obs_socket = SRT_INVALID_SOCK;
+        participant->loopback_listener.store(loopback_listener);
+        // obs_socket is already SRT_INVALID_SOCK from default initialization
 
         {
             std::lock_guard<std::mutex> lock(participants_mutex);
-            // If participant already exists, clean them up first
-            auto it = participants.find(username);
-            if (it != participants.end()) {
-                obs_log(LOG_INFO, "Participant %s reconnected. Cleaning up old session.", username.c_str());
-                std::shared_ptr<Participant> old_p = it->second;
-                participants.erase(it);
-
-                // Detach the thread immediately so it doesn't terminate on destruction
-                if (old_p->relay_thread && old_p->relay_thread->joinable()) {
-                    old_p->relay_thread->detach();
-                }
-
-                old_p->active = false;
-                if (old_p->client_socket != SRT_INVALID_SOCK) srt_close(old_p->client_socket);
-                if (old_p->obs_socket != SRT_INVALID_SOCK) srt_close(old_p->obs_socket);
-                if (old_p->loopback_listener != SRT_INVALID_SOCK) srt_close(old_p->loopback_listener);
-
-                release_loopback_port(old_p->loopback_port);
-            }
             participants[username] = participant;
         }
 
@@ -305,32 +350,58 @@ private:
         
         // Wait for OBS to connect (with a 10s timeout)
         int timeout_ms = 10000;
-        srt_setsockopt(loopback_listener, 0, SRTO_RCVTIMEO, &timeout_ms, sizeof(timeout_ms));
+        SRTSOCKET lb_sock = participant->loopback_listener.load();
+        if (lb_sock != SRT_INVALID_SOCK) {
+            srt_setsockopt(lb_sock, 0, SRTO_RCVTIMEO, &timeout_ms, sizeof(timeout_ms));
+        }
         
-        SRTSOCKET obs_sock = srt_accept(loopback_listener, (struct sockaddr*)&obs_addr, &addr_len);
+        SRTSOCKET obs_sock = SRT_INVALID_SOCK;
+        lb_sock = participant->loopback_listener.load();
+        if (lb_sock != SRT_INVALID_SOCK) {
+            obs_sock = srt_accept(lb_sock, (struct sockaddr*)&obs_addr, &addr_len);
+        }
         if (obs_sock == SRT_INVALID_SOCK) {
             obs_log(LOG_ERROR, "OBS failed to connect to loopback listener on port %d: %s", loopback_port, srt_getlasterror_str());
             cleanup_participant(participant);
             return;
         }
 
-        participant->obs_socket = obs_sock;
+        participant->obs_socket.store(obs_sock);
 
         // Start relay thread
         participant->relay_thread = std::make_unique<std::thread>(&SRTBroker::relay_loop, this, participant);
+      } catch (const std::exception &e) {
+          obs_log(LOG_ERROR, "Exception in handle_new_publisher: %s", e.what());
+          srt_close(client_sock);
+      } catch (...) {
+          obs_log(LOG_ERROR, "Unknown exception in handle_new_publisher");
+          srt_close(client_sock);
+      }
     }
 
     void relay_loop(std::shared_ptr<Participant> p) {
+      try {
         char buffer[1316]; // SRT standard packet size (MPEG-TS payloads fit in 1316 bytes)
         obs_log(LOG_INFO, "Starting SRT relay loop for %s", p->name.c_str());
 
         // Set non-blocking/recv timeout to check for active state periodically
         int timeout_ms = 500;
-        srt_setsockopt(p->client_socket, 0, SRTO_RCVTIMEO, &timeout_ms, sizeof(timeout_ms));
+        SRTSOCKET cs = p->client_socket.load();
+        if (cs != SRT_INVALID_SOCK) {
+            srt_setsockopt(cs, 0, SRTO_RCVTIMEO, &timeout_ms, sizeof(timeout_ms));
+        }
 
         while (running && p->active) {
+            // Validate sockets before SRT operations
+            SRTSOCKET recv_sock = p->client_socket.load();
+            SRTSOCKET send_sock = p->obs_socket.load();
+            if (recv_sock == SRT_INVALID_SOCK || send_sock == SRT_INVALID_SOCK) {
+                obs_log(LOG_INFO, "Socket invalidated for %s, exiting relay loop", p->name.c_str());
+                break;
+            }
+
             // Read from client
-            int bytes_read = srt_recvmsg(p->client_socket, buffer, sizeof(buffer));
+            int bytes_read = srt_recvmsg(recv_sock, buffer, sizeof(buffer));
             if (bytes_read == SRT_ERROR) {
                 int err = srt_getlasterror(NULL);
                 if (err == SRT_EASYNCRCV || err == SRT_ETIMEOUT) { // Timeout, loop and check active state
@@ -346,7 +417,12 @@ private:
             }
 
             // Write to OBS loopback
-            int bytes_written = srt_sendmsg(p->obs_socket, buffer, bytes_read, -1, 0);
+            send_sock = p->obs_socket.load();
+            if (send_sock == SRT_INVALID_SOCK) {
+                obs_log(LOG_INFO, "OBS socket invalidated for %s, exiting relay loop", p->name.c_str());
+                break;
+            }
+            int bytes_written = srt_sendmsg(send_sock, buffer, bytes_read, -1, 0);
             if (bytes_written == SRT_ERROR) {
                 obs_log(LOG_WARNING, "Failed to write to OBS loopback for %s: %s", p->name.c_str(), srt_getlasterror_str());
                 break;
@@ -355,6 +431,13 @@ private:
 
         obs_log(LOG_INFO, "Stopping SRT relay loop for %s", p->name.c_str());
         cleanup_participant(p);
+      } catch (const std::exception &e) {
+          obs_log(LOG_ERROR, "Exception in relay_loop for %s: %s", p->name.c_str(), e.what());
+          cleanup_participant(p);
+      } catch (...) {
+          obs_log(LOG_ERROR, "Unknown exception in relay_loop for %s", p->name.c_str());
+          cleanup_participant(p);
+      }
     }
 
     void cleanup_participant(std::shared_ptr<Participant> p) {
@@ -370,22 +453,17 @@ private:
             }
         }
 
-        release_loopback_port(p->loopback_port);
+        if (p->loopback_port != -1) {
+            release_loopback_port(p->loopback_port);
+            p->loopback_port = -1;
+        }
+
         p->active = false;
 
-        // Close sockets
-        if (p->client_socket != SRT_INVALID_SOCK) {
-            srt_close(p->client_socket);
-            p->client_socket = SRT_INVALID_SOCK;
-        }
-        if (p->obs_socket != SRT_INVALID_SOCK) {
-            srt_close(p->obs_socket);
-            p->obs_socket = SRT_INVALID_SOCK;
-        }
-        if (p->loopback_listener != SRT_INVALID_SOCK) {
-            srt_close(p->loopback_listener);
-            p->loopback_listener = SRT_INVALID_SOCK;
-        }
+        // Close sockets (atomically, prevents double-close)
+        close_srt_socket_once(p->client_socket);
+        close_srt_socket_once(p->obs_socket);
+        close_srt_socket_once(p->loopback_listener);
 
         // Join or detach the relay thread
         if (p->relay_thread) {
@@ -410,11 +488,10 @@ private:
 
     int find_free_loopback_port() {
         std::lock_guard<std::mutex> lock(s_ports_mutex);
-        static int next_port = 10000;
-        for (int i = 0; i < 100; ++i) {
-            int port = next_port++;
-            if (next_port >= 10100) next_port = 10000;
-
+        static constexpr int PORT_MIN = 10000;
+        static constexpr int PORT_MAX = 10100;
+        // Scan the full range every call so freed ports are immediately reusable
+        for (int port = PORT_MIN; port < PORT_MAX; ++port) {
             if (s_allocated_ports.find(port) == s_allocated_ports.end()) {
                 s_allocated_ports.insert(port);
                 return port;
@@ -426,6 +503,9 @@ private:
     std::atomic<bool> running;
     SRTSOCKET listener_socket;
     std::unique_ptr<std::thread> listener_thread;
+
+    std::mutex handler_threads_mutex;
+    std::vector<std::thread> handler_threads;
 
     std::mutex participants_mutex;
     std::map<std::string, std::shared_ptr<Participant>> participants;
@@ -448,7 +528,7 @@ void update_participants_list_ui() {
     obs_queue_task(OBS_TASK_UI, update_participants_list_ui_task, nullptr, false);
 }
 
-static void setup_plugin_dock() {
+static void setup_plugin_dock(int broker_port) {
     QMainWindow *main_window = static_cast<QMainWindow *>(obs_frontend_get_main_window());
     if (!main_window) {
         obs_log(LOG_WARNING, "OBS main window not found, cannot create dock");
@@ -507,7 +587,8 @@ static void setup_plugin_dock() {
     layout->addWidget(s_participants_list);
 
     // Section 3: Connection Info Helper
-    QLabel *info_label = new QLabel("SRT Broker Listening on UDP port <b>9000</b>", content);
+    QString portStr = QString::number(broker_port);
+    QLabel *info_label = new QLabel("SRT Broker Listening on UDP port <b>" + portStr + "</b>", content);
     info_label->setAlignment(Qt::AlignCenter);
     info_label->setStyleSheet("color: rgb(180, 190, 254); font-size: 11px; margin-top: 4px;");
     layout->addWidget(info_label);
@@ -516,14 +597,15 @@ static void setup_plugin_dock() {
     s_dock_widget->setWidget(content);
 
     obs_frontend_add_custom_qdock("srtMeetingControlDock", s_dock_widget);
-    main_window->addDockWidget(Qt::RightDockWidgetArea, s_dock_widget);
+    // Note: obs_frontend_add_custom_qdock already adds the dock to the main
+    // window internally; calling addDockWidget a second time would double-add it.
     s_dock_widget->show();
     obs_log(LOG_INFO, "SRT Meeting UI dock registered successfully");
 }
 
 static void obssrt_frontend_event(enum obs_frontend_event event, void *private_data) {
     if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
-        setup_plugin_dock();
+        setup_plugin_dock(BROKER_PORT);
     }
     (void)private_data;
 }
@@ -535,8 +617,8 @@ bool obs_module_load(void)
     // Register frontend event callback to create dock once UI is loaded
     obs_frontend_add_event_callback(obssrt_frontend_event, nullptr);
 
-    // Start SRT broker on port 9000
-    if (!s_broker.start(9000)) {
+    // Start SRT broker on the configured port
+    if (!s_broker.start(BROKER_PORT)) {
         obs_log(LOG_ERROR, "Failed to start SRT broker");
         return false;
     }

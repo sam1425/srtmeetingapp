@@ -55,11 +55,22 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import android.content.pm.ActivityInfo
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.pointerInput
+
+// ── Stream state machine ───────────────────────────────────────────────
+sealed class StreamState {
+    object Idle : StreamState()
+    object Connecting : StreamState()
+    object Streaming : StreamState()
+    object Stopping : StreamState()
+    data class Reconnecting(val attempt: Int, val maxAttempts: Int) : StreamState()
+}
 
 class MainActivity : ComponentActivity(), ConnectChecker {
 
@@ -79,13 +90,22 @@ class MainActivity : ComponentActivity(), ConnectChecker {
         else     -> Triple(1280, 720, 2000 * 1024) // "High" default
     }
 
-    private val isStreamingState = mutableStateOf(false)
-    private val isProcessingState = mutableStateOf(false)
+    // ── State machine replaces old boolean flags ────────────────────────
+    private val streamState = mutableStateOf<StreamState>(StreamState.Idle)
     private val isAudioEnabledState = mutableStateOf(true)
     private val logs = mutableStateListOf<String>()
     // Orientation control — landscape is the default; portrait is opt-in per session
     private val allowVerticalState = mutableStateOf(false)
     private val isPortraitState = mutableStateOf(false)
+
+    // ── Reconnection infrastructure ────────────────────────────────────
+    private var reconnectJob: Job? = null
+    private var lastSrtUrl: String? = null
+    companion object {
+        private const val MAX_RECONNECT_ATTEMPTS = 5
+        private const val INITIAL_BACKOFF_MS = 1000L
+        private const val MAX_BACKOFF_MS = 15_000L
+    }
 
     private val requestPermissionsLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()

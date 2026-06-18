@@ -201,7 +201,7 @@ void MainWindow::discoverDevices()
             if (nameFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
                 friendlyName = QString::fromUtf8(nameFile.readAll()).trimmed();
             }
-            m_videoCombo->addItem(QString("%1 (/dev/%2)").arg(friendlyName, dev), QString("/dev/%2").arg(dev));
+            m_videoCombo->addItem(QString("%1 (/dev/%2)").arg(friendlyName, dev), QString("/dev/%1").arg(dev));
         }
     }
     if (m_videoCombo->count() == 0) {
@@ -262,6 +262,38 @@ void MainWindow::discoverDevices()
     }
     if (m_audioCombo->count() == 0) {
         m_audioCombo->addItem("Default Microphone", "default");
+    }
+#elif defined(Q_OS_MAC)
+    // Run FFmpeg to list AVFoundation devices on macOS
+    QProcess ffmpegProc;
+    ffmpegProc.start("ffmpeg", QStringList() << "-list_devices" << "true" << "-f" << "avfoundation" << "-i" << "");
+    if (ffmpegProc.waitForFinished(2000)) {
+        QString errOutput = QString::fromUtf8(ffmpegProc.readAllStandardError());
+        bool inVideo = false;
+        bool inAudio = false;
+        QStringList lines = errOutput.split('\n');
+        for (const QString &line : lines) {
+            if (line.contains("AVFoundation video devices")) { inVideo = true; inAudio = false; continue; }
+            if (line.contains("AVFoundation audio devices")) { inAudio = true; inVideo = false; continue; }
+            // Device lines look like: [AVFoundation indev @ ...] [0] FaceTime HD Camera
+            QRegularExpression devRegex("\\[(\\d+)\\]\\s+(.+)");
+            QRegularExpressionMatch match = devRegex.match(line);
+            if (match.hasMatch()) {
+                QString devIndex = match.captured(1);
+                QString devName  = match.captured(2).trimmed();
+                if (inVideo) {
+                    m_videoCombo->addItem(devName, devIndex);
+                } else if (inAudio) {
+                    m_audioCombo->addItem(devName, devIndex);
+                }
+            }
+        }
+    }
+    if (m_videoCombo->count() == 0) {
+        m_videoCombo->addItem("FaceTime HD Camera", "0");
+    }
+    if (m_audioCombo->count() == 0) {
+        m_audioCombo->addItem("Built-in Microphone", "0");
     }
 #endif
 
@@ -324,6 +356,9 @@ void MainWindow::startStreaming()
 #elif defined(Q_OS_WIN)
     // Windows DirectShow capture command
     arguments << "-f" << "dshow" << "-video_size" << "1280x720" << "-framerate" << "30" << "-i" << QString("video=%1:audio=%2").arg(videoDev, audioDev);
+#elif defined(Q_OS_MAC)
+    // macOS AVFoundation capture command (index-based: video:audio)
+    arguments << "-f" << "avfoundation" << "-video_size" << "1280x720" << "-framerate" << "30" << "-i" << QString("%1:%2").arg(videoDev, audioDev);
 #endif
 
     // High quality, ultra low latency streaming parameters
