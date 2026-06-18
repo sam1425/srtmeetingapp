@@ -2,13 +2,6 @@
 ; Inno Setup 6+ script (per-user, no admin required, modern)
 ; This file is processed by Package-Windows.ps1 — placeholder format: __VARNAME__
 
-#define MyAppName "__PLUGIN_DISPLAY_NAME__"
-#define MyAppNameShort "__PLUGIN_NAME__"
-#define MyAppVersion "__PLUGIN_VERSION__"
-#define MyAppPublisher "__PLUGIN_AUTHOR__"
-#define MyAppURL "__PLUGIN_WEBSITE__"
-#define MyAppArch "__TARGET_ARCH__"
-
 ; BUILD_DIR and OUTPUT_DIR are passed via ISCC /dBUILD_DIR=... /dOUTPUT_DIR=...
 #ifndef BUILD_DIR
   #define BUILD_DIR "."
@@ -17,24 +10,22 @@
   #define OUTPUT_DIR "."
 #endif
 
-#define MyAppOutput "{#MyAppNameShort}-{#MyAppVersion}-windows-{#MyAppArch}"
-
 [Setup]
 AppId={{E8A4B8C0-2E5F-4A7D-9B3C-1F6D8A2E5C7B}
-AppName={#MyAppName}
-AppVersion={#MyAppVersion}
-AppPublisher={#MyAppPublisher}
-AppPublisherURL={#MyAppURL}
-AppSupportURL={#MyAppURL}
-AppUpdatesURL={#MyAppURL}
-VersionInfoVersion={#MyAppVersion}
-DefaultDirName={userappdata}\obs-studio\plugins\{#MyAppNameShort}
+AppName=__PLUGIN_DISPLAY_NAME__
+AppVersion=__PLUGIN_VERSION__
+AppPublisher=__PLUGIN_AUTHOR__
+AppPublisherURL=__PLUGIN_WEBSITE__
+AppSupportURL=__PLUGIN_WEBSITE__
+AppUpdatesURL=__PLUGIN_WEBSITE__
+VersionInfoVersion=__PLUGIN_VERSION__
+DefaultDirName={userappdata}\obs-studio\plugins\__PLUGIN_NAME__
 OutputDir={#OUTPUT_DIR}
-OutputBaseFilename={#MyAppOutput}
+OutputBaseFilename=__OUTPUT_NAME__
 Compression=lzma2/ultra64
 SolidCompression=yes
-UninstallDisplayName={#MyAppName} {#MyAppVersion}
-UninstallDisplayIcon={app}\bin\64bit\{#MyAppNameShort}.dll
+UninstallDisplayName=__PLUGIN_DISPLAY_NAME__ __PLUGIN_VERSION__
+UninstallDisplayIcon={app}\bin\64bit\__PLUGIN_NAME__.dll
 DisableProgramGroupPage=yes
 DisableDirPage=yes
 DisableReadyPage=yes
@@ -49,15 +40,15 @@ MinVersion=10.0
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
-Source: "{#BUILD_DIR}\bin\64bit\{#MyAppNameShort}.dll"; DestDir: "{app}\bin\64bit"; Flags: ignoreversion
-Source: "{#BUILD_DIR}\bin\64bit\{#MyAppNameShort}.pdb"; DestDir: "{app}\bin\64bit"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#BUILD_DIR}\bin\64bit\__PLUGIN_NAME__.dll"; DestDir: "{app}\bin\64bit"; Flags: ignoreversion
+Source: "{#BUILD_DIR}\bin\64bit\__PLUGIN_NAME__.pdb"; DestDir: "{app}\bin\64bit"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#BUILD_DIR}\data\*"; DestDir: "{app}\data"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
+Name: "{group}\{cm:UninstallProgram,__PLUGIN_DISPLAY_NAME__}"; Filename: "{uninstallexe}"
 
 [Run]
-Filename: "{cmd}"; Parameters: "/C echo SRT Meeting App plugin installed successfully."; Flags: runhidden
+Filename: "{cmd}"; Parameters: "/C echo __PLUGIN_DISPLAY_NAME__ plugin installed successfully."; Flags: runhidden
 
 [Code]
 function IsAppAlreadyInstalled(const AppId: string): Boolean;

@@ -107,6 +107,7 @@ function Package {
         $IssContent = $IssContent -replace '__PLUGIN_AUTHOR__', $ProductAuthor
         $IssContent = $IssContent -replace '__PLUGIN_WEBSITE__', $ProductWebsite
         $IssContent = $IssContent -replace '__TARGET_ARCH__', $Target
+        $IssContent = $IssContent -replace '__OUTPUT_NAME__', $OutputName
 
         Set-Content -Path $IssFile -Value $IssContent -NoNewline
 
