@@ -25,3 +25,6 @@
 
 # Exclude CMake build number cache
 /cmake/.CMakeBuildNumber
+
+# Exclude Android heap dumps (large binary blobs)
+*.hprof
