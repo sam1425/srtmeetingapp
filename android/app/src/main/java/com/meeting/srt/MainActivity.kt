@@ -34,7 +34,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
 
     private var srtCamera2: SrtCamera2? = null
     private var openGlView: OpenGlView? = null
-    private var isSurfaceReady = false
+    @Volatile private var isSurfaceReady = false
     @Volatile private var encodersReady = false
 
     // ── Reactive state ──────────────────────────────────────────────────
@@ -69,6 +69,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
     @Volatile private var lastActualBitrate = 0L
     private fun targetBitrate(): Int = dimensionsForProfile(activeProfile.value).third
     companion object {
+        private val dateFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault())
         private const val MAX_RECONNECT_ATTEMPTS = 5
         private const val INITIAL_BACKOFF_MS = 1000L
         private const val MAX_BACKOFF_MS = 15_000L
@@ -239,8 +240,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
     private fun logMessage(message: String) {
         android.util.Log.d("MainActivity", message)
         runOnUiThread {
-            val timestamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date())
-            logs.add("[$timestamp] $message")
+            logs.add("[${dateFormat.format(Date())}] $message")
         }
     }
 
