@@ -32,6 +32,8 @@ fun MainScreen(
     port: String,
     name: String,
     selectedProfile: String,
+    latencyMs: Int,
+    latencyAuto: Boolean,
     streamState: StreamState,
     isAudioEnabled: Boolean,
     allowVertical: Boolean,
@@ -40,6 +42,8 @@ fun MainScreen(
     onPortChange: (String) -> Unit,
     onNameChange: (String) -> Unit,
     onProfileChange: (String) -> Unit,
+    onLatencyMsChange: (Int) -> Unit,
+    onLatencyAutoChange: (Boolean) -> Unit,
     onAllowVerticalChange: (Boolean) -> Unit,
     onToggleStream: () -> Unit,
     onToggleAudio: () -> Unit,
@@ -189,11 +193,14 @@ fun MainScreen(
             onNameChange = onNameChange,
             selectedProfile = selectedProfile,
             onProfileChange = onProfileChange,
+            latencyMs = latencyMs,
+            latencyAuto = latencyAuto,
+            onLatencyMsChange = onLatencyMsChange,
+            onLatencyAutoChange = onLatencyAutoChange,
             allowVertical = allowVertical,
             onAllowVerticalChange = onAllowVerticalChange,
             isActive = isActive,
-            onDismiss = { showConfigDialog = false },
-            onLogProfileChange = { /* handled by onProfileChange */ }
+            onDismiss = { showConfigDialog = false }
         )
     }
 

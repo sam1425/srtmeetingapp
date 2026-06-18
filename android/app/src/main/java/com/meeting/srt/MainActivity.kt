@@ -49,6 +49,8 @@ class MainActivity : ComponentActivity(), ConnectChecker {
     private var port by mutableStateOf("9000")
     private var name by mutableStateOf("Default")
     private var selectedProfile by mutableStateOf("High")
+    private var latencyMs by mutableStateOf(120)
+    private var latencyAuto by mutableStateOf(true)
 
     private fun dimensionsForProfile(profile: String): Triple<Int, Int, Int> = when (profile) {
         "Medium" -> Triple(854, 480, 1000 * 1024)
@@ -122,6 +124,8 @@ class MainActivity : ComponentActivity(), ConnectChecker {
                         port = port,
                         name = name,
                         selectedProfile = selectedProfile,
+                        latencyMs = latencyMs,
+                        latencyAuto = latencyAuto,
                         streamState = streamState.value,
                         isAudioEnabled = isAudioEnabledState.value,
                         allowVertical = allowVerticalState.value,
@@ -136,6 +140,8 @@ class MainActivity : ComponentActivity(), ConnectChecker {
                             val (w, h, br) = dimensionsForProfile(it)
                             logMessage("Selected profile: $it (${w}x${h}, ${br / 1024} Kbps)")
                         },
+                        onLatencyMsChange = { latencyMs = it },
+                        onLatencyAutoChange = { latencyAuto = it },
                         onAllowVerticalChange = { enabled ->
                             allowVerticalState.value = enabled
                             if (!enabled) {
@@ -381,7 +387,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
             logMessage("Error: Missing IP or Display Name"); return
         }
 
-        val srtUrl = "srt://${ip}:${portInt}/publish:${sanitizedName}?latency=120000"
+        val srtUrl = "srt://${ip}:${portInt}/publish:${sanitizedName}?latency=${latencyMs * 1000}"
         lastSrtUrl = srtUrl
         logMessage("Connecting to $srtUrl")
         streamState.value = StreamState.Connecting
