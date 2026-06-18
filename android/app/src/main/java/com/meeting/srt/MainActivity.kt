@@ -21,11 +21,13 @@ import com.pedro.common.ConnectChecker
 import com.pedro.library.srt.SrtCamera2
 import com.pedro.library.view.OpenGlView
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -59,10 +61,12 @@ class MainActivity : ComponentActivity(), ConnectChecker {
     // ── Reconnection infrastructure ────────────────────────────────────
     private var reconnectJob: Job? = null
     @Volatile private var lastSrtUrl: String? = null
+    private var reconnectionResult = CompletableDeferred<Boolean>()
     companion object {
-        private const val MAX_RECONNECT_ATTEMPTS = 5
-        private const val INITIAL_BACKOFF_MS = 1000L
-        private const val MAX_BACKOFF_MS = 15_000L
+        private const val MAX_RECONNECT_ATTEMPTS = 10
+        private const val INITIAL_BACKOFF_MS = 0L
+        private const val MAX_BACKOFF_MS = 8_000L
+        private const val RECONNECT_TIMEOUT_MS = 5_000L
     }
 
     private val requestPermissionsLauncher = registerForActivityResult(
@@ -237,6 +241,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
 
     override fun onConnectionSuccess() {
         logMessage("Connection successful!")
+        reconnectionResult.complete(true)
         runOnUiThread {
             streamState.value = StreamState.Streaming
         }
@@ -245,7 +250,10 @@ class MainActivity : ComponentActivity(), ConnectChecker {
     override fun onConnectionFailed(reason: String) {
         logMessage("Connection failed: $reason")
         val currentState = streamState.value
-        if (currentState is StreamState.Reconnecting) return
+        if (currentState is StreamState.Reconnecting) {
+            reconnectionResult.complete(false)
+            return
+        }
         if (currentState is StreamState.Stopping || currentState is StreamState.Idle) {
             lifecycleScope.launch(Dispatchers.IO) {
                 srtCamera2?.stopStream()
@@ -310,26 +318,23 @@ class MainActivity : ComponentActivity(), ConnectChecker {
             var backoff = INITIAL_BACKOFF_MS
             while (attempt <= MAX_RECONNECT_ATTEMPTS) {
                 streamState.value = StreamState.Reconnecting(attempt, MAX_RECONNECT_ATTEMPTS)
-                logMessage("Reconnect attempt $attempt/$MAX_RECONNECT_ATTEMPTS in ${backoff / 1000}s...")
+                logMessage("Reconnect attempt $attempt/$MAX_RECONNECT_ATTEMPTS...")
                 delay(backoff)
                 if (streamState.value is StreamState.Stopping || streamState.value is StreamState.Idle) return@launch
-                if (!encodersReady) encodersReady = prepareEncoders()
-                if (!encodersReady) {
-                    logMessage("Reconnect: encoders not ready, retrying...")
-                    attempt++
-                    backoff = (backoff * 2).coerceAtMost(MAX_BACKOFF_MS)
-                    continue
-                }
+                reconnectionResult = CompletableDeferred()
                 logMessage("Reconnecting to $url")
                 withContext(Dispatchers.IO) {
                     try {
                         srtCamera2?.startStream(url)
                     } catch (e: Exception) {
                         logMessage("Reconnect startStream failed: ${e.message}")
+                        reconnectionResult.complete(false)
                     }
                 }
-                delay(3000)
-                if (streamState.value is StreamState.Streaming) {
+                val success = withTimeoutOrNull(RECONNECT_TIMEOUT_MS) {
+                    reconnectionResult.await()
+                } ?: false
+                if (success) {
                     logMessage("Reconnection successful!")
                     return@launch
                 }
