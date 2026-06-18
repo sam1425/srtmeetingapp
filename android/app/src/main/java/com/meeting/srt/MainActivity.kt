@@ -90,11 +90,9 @@ class MainActivity : ComponentActivity(), ConnectChecker {
         else     -> Triple(1280, 720, 2000 * 1024) // "High" default
     }
 
-    // ── State machine replaces old boolean flags ────────────────────────
     private val streamState = mutableStateOf<StreamState>(StreamState.Idle)
     private val isAudioEnabledState = mutableStateOf(true)
     private val logs = mutableStateListOf<String>()
-    // Orientation control — landscape is the default; portrait is opt-in per session
     private val allowVerticalState = mutableStateOf(false)
     private val isPortraitState = mutableStateOf(false)
 
@@ -177,9 +175,10 @@ class MainActivity : ComponentActivity(), ConnectChecker {
 
     override fun onPause() {
         super.onPause()
+        cancelReconnect()
         if (srtCamera2?.isStreaming == true) {
             srtCamera2?.stopStream()
-            isStreamingState.value = false
+            streamState.value = StreamState.Idle
         }
         if (srtCamera2?.isOnPreview == true) {
             srtCamera2?.stopPreview()
@@ -244,23 +243,35 @@ class MainActivity : ComponentActivity(), ConnectChecker {
     override fun onConnectionSuccess() {
         logMessage("Connection successful!")
         runOnUiThread {
-            isStreamingState.value = true
-            isProcessingState.value = false
+            streamState.value = StreamState.Streaming
         }
     }
 
     override fun onConnectionFailed(reason: String) {
         logMessage("Connection failed: $reason")
-        runOnUiThread { isProcessingState.value = true }
+        val currentState = streamState.value
+        // If the user pressed stop (Stopping) or we're already idle, don't reconnect
+        if (currentState is StreamState.Stopping || currentState is StreamState.Idle) {
+            lifecycleScope.launch(Dispatchers.IO) {
+                srtCamera2?.stopStream()
+                srtCamera2?.stopPreview()
+                withContext(Dispatchers.Main) {
+                    streamState.value = StreamState.Idle
+                    encodersReady = false
+                    startCameraPreview()
+                }
+            }
+            return
+        }
+        // Otherwise, attempt auto-reconnect
         lifecycleScope.launch(Dispatchers.IO) {
             srtCamera2?.stopStream()
             srtCamera2?.stopPreview()
             withContext(Dispatchers.Main) {
-                isStreamingState.value = false
                 encodersReady = false
                 startCameraPreview()
-                isProcessingState.value = false
-                Toast.makeText(this@MainActivity, "Connection Failed: $reason", Toast.LENGTH_LONG).show()
+                Toast.makeText(this@MainActivity, "Connection Failed: $reason", Toast.LENGTH_SHORT).show()
+                startReconnect()
             }
         }
     }
@@ -269,15 +280,28 @@ class MainActivity : ComponentActivity(), ConnectChecker {
 
     override fun onDisconnect() {
         logMessage("Disconnected from server.")
-        runOnUiThread { isProcessingState.value = true }
+        val currentState = streamState.value
+        // If the user pressed stop, just finish the teardown
+        if (currentState is StreamState.Stopping || currentState is StreamState.Idle) {
+            lifecycleScope.launch(Dispatchers.IO) {
+                srtCamera2?.stopStream()
+                srtCamera2?.stopPreview()
+                withContext(Dispatchers.Main) {
+                    streamState.value = StreamState.Idle
+                    encodersReady = false
+                    startCameraPreview()
+                }
+            }
+            return
+        }
+        // Unexpected disconnect while streaming → try to reconnect
         lifecycleScope.launch(Dispatchers.IO) {
             srtCamera2?.stopStream()
             srtCamera2?.stopPreview()
             withContext(Dispatchers.Main) {
-                isStreamingState.value = false
                 encodersReady = false
                 startCameraPreview()
-                isProcessingState.value = false
+                startReconnect()
             }
         }
     }
@@ -285,30 +309,101 @@ class MainActivity : ComponentActivity(), ConnectChecker {
     override fun onAuthError() { logMessage("Authentication error.") }
     override fun onAuthSuccess() { logMessage("Authentication successful.") }
 
+    /**
+     * Launch exponential-backoff reconnection. Must be called on the main thread.
+     * Cancels any already-running reconnect coroutine first.
+     */
+    private fun startReconnect() {
+        val url = lastSrtUrl
+        if (url == null) {
+            logMessage("Cannot reconnect: no previous URL")
+            streamState.value = StreamState.Idle
+            return
+        }
+        cancelReconnect()
+        reconnectJob = lifecycleScope.launch {
+            var attempt = 1
+            var backoff = INITIAL_BACKOFF_MS
+            while (attempt <= MAX_RECONNECT_ATTEMPTS) {
+                streamState.value = StreamState.Reconnecting(attempt, MAX_RECONNECT_ATTEMPTS)
+                logMessage("Reconnect attempt $attempt/$MAX_RECONNECT_ATTEMPTS in ${backoff / 1000}s...")
+                delay(backoff)
+                // Check if cancelled (user pressed stop) during delay
+                if (streamState.value is StreamState.Stopping || streamState.value is StreamState.Idle) return@launch
+
+                // Ensure encoders are ready
+                if (!encodersReady) {
+                    encodersReady = prepareEncoders()
+                }
+                if (!encodersReady) {
+                    logMessage("Reconnect: encoders not ready, retrying...")
+                    attempt++
+                    backoff = (backoff * 2).coerceAtMost(MAX_BACKOFF_MS)
+                    continue
+                }
+
+                logMessage("Reconnecting to $url")
+                withContext(Dispatchers.IO) {
+                    try {
+                        srtCamera2?.startStream(url)
+                    } catch (e: Exception) {
+                        logMessage("Reconnect startStream failed: ${e.message}")
+                    }
+                }
+                // After startStream, onConnectionSuccess or onConnectionFailed will fire.
+                // If success, streamState becomes Streaming and this loop exits naturally.
+                // Wait a bit to see which callback fires before deciding.
+                delay(3000)
+                if (streamState.value is StreamState.Streaming) {
+                    logMessage("Reconnection successful!")
+                    return@launch
+                }
+                attempt++
+                backoff = (backoff * 2).coerceAtMost(MAX_BACKOFF_MS)
+            }
+            // Exhausted all attempts
+            logMessage("Reconnection failed after $MAX_RECONNECT_ATTEMPTS attempts.")
+            withContext(Dispatchers.Main) {
+                streamState.value = StreamState.Idle
+                Toast.makeText(this@MainActivity, "Reconnection failed after $MAX_RECONNECT_ATTEMPTS attempts", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    /** Cancel any running reconnect coroutine. Safe to call from any thread. */
+    private fun cancelReconnect() {
+        reconnectJob?.cancel()
+        reconnectJob = null
+    }
+
     private fun toggleStream(ip: String, portString: String, name: String) {
         if (srtCamera2 == null) return
-        if (isProcessingState.value) {
-            logMessage("Ignoring tap: processing previous action")
+        val currentState = streamState.value
+
+        // Ignore taps while a transition is in progress
+        if (currentState is StreamState.Connecting || currentState is StreamState.Stopping) {
+            logMessage("Ignoring tap: transition in progress")
             return
         }
 
-        if (isStreamingState.value) {
+        // ── STOP (from Streaming or Reconnecting) ────────────────────────
+        if (currentState is StreamState.Streaming || currentState is StreamState.Reconnecting) {
             logMessage("Stopping stream...")
-            isProcessingState.value = true
-            isStreamingState.value = false
+            cancelReconnect()
+            streamState.value = StreamState.Stopping
             encodersReady = false
-            // Use lifecycleScope so stopStream() runs on IO without racing lifecycle callbacks
             lifecycleScope.launch(Dispatchers.IO) {
                 srtCamera2?.stopStream()
                 srtCamera2?.stopPreview()
                 withContext(Dispatchers.Main) {
+                    streamState.value = StreamState.Idle
                     startCameraPreview()
-                    isProcessingState.value = false
                 }
             }
             return
         }
 
+        // ── START (from Idle) ────────────────────────────────────────────
         if (!encodersReady) {
             logMessage("Encoders not ready, retrying...")
             encodersReady = prepareEncoders()
@@ -330,10 +425,9 @@ class MainActivity : ComponentActivity(), ConnectChecker {
         // Do NOT change this to query-parameter style — it will produce
         // "endpoint malformed" errors at connection time.
         val srtUrl = "srt://${ip}:${port}/publish:${sanitizedName}?latency=120000"
+        lastSrtUrl = srtUrl
         logMessage("Connecting to $srtUrl")
-        // Do NOT set isStreamingState=true here — wait for onConnectionSuccess() so
-        // the UI never shows LIVE while still connecting or after a failed attempt.
-        isProcessingState.value = true
+        streamState.value = StreamState.Connecting
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 srtCamera2?.startStream(srtUrl)
@@ -341,9 +435,8 @@ class MainActivity : ComponentActivity(), ConnectChecker {
                 logMessage("startStream failed: ${e.message}")
                 withContext(Dispatchers.Main) {
                     Toast.makeText(this@MainActivity, "Stream start failed: ${e.message}", Toast.LENGTH_LONG).show()
-                    isStreamingState.value = false
+                    streamState.value = StreamState.Idle
                     encodersReady = false
-                    isProcessingState.value = false
                     startCameraPreview()
                 }
             }
@@ -543,7 +636,10 @@ class MainActivity : ComponentActivity(), ConnectChecker {
         var showConfigDialog by remember { mutableStateOf(false) }
         var showLogsDialog by remember { mutableStateOf(false) }
 
-        val isStreaming by isStreamingState
+        val currentStreamState by streamState
+        // Derived helpers used throughout the UI
+        val isStreaming = currentStreamState is StreamState.Streaming
+        val isActive    = currentStreamState !is StreamState.Idle  // true while connecting / streaming / reconnecting / stopping
         val isAudioEnabled by isAudioEnabledState
         val allowVertical by allowVerticalState
 
@@ -580,14 +676,27 @@ class MainActivity : ComponentActivity(), ConnectChecker {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                val dotColor = when (currentStreamState) {
+                    is StreamState.Streaming    -> Color(0xFFE24B4A)
+                    is StreamState.Reconnecting -> Color(0xFFE5C890) // amber
+                    is StreamState.Connecting   -> Color(0xFFCBA6F7) // purple
+                    else                        -> Color(0xFFBAC2DE)
+                }
+                val statusText = when (val s = currentStreamState) {
+                    is StreamState.Streaming    -> "LIVE"
+                    is StreamState.Reconnecting -> "RETRY ${s.attempt}/${s.maxAttempts}"
+                    is StreamState.Connecting   -> "CONNECTING"
+                    is StreamState.Stopping     -> "STOPPING"
+                    else                        -> "STANDBY"
+                }
                 Box(
                     modifier = Modifier
                         .size(8.dp)
                         .clip(CircleShape)
-                        .background(if (isStreaming) Color(0xFFE24B4A) else Color(0xFFBAC2DE))
+                        .background(dotColor)
                 )
                 Text(
-                    text = if (isStreaming) "LIVE" else "STANDBY",
+                    text = statusText,
                     color = Color.White,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
@@ -760,9 +869,9 @@ class MainActivity : ComponentActivity(), ConnectChecker {
                     ) {
                         OutlinedTextField(
                             value = ip,
-                            onValueChange = { if (!isStreaming) ip = it },
+                            onValueChange = { if (!isActive) ip = it },
                             label = { Text("Broadcaster IP") },
-                            enabled = !isStreaming,
+                            enabled = !isActive,
                             modifier = Modifier.fillMaxWidth(),
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedBorderColor = MaterialTheme.colorScheme.primary,
@@ -774,9 +883,9 @@ class MainActivity : ComponentActivity(), ConnectChecker {
                         ) {
                             OutlinedTextField(
                                 value = port,
-                                onValueChange = { if (!isStreaming) port = it },
+                                onValueChange = { if (!isActive) port = it },
                                 label = { Text("SRT Port") },
-                                enabled = !isStreaming,
+                                enabled = !isActive,
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                 modifier = Modifier.weight(1f),
                                 colors = OutlinedTextFieldDefaults.colors(
@@ -786,9 +895,9 @@ class MainActivity : ComponentActivity(), ConnectChecker {
                             )
                             OutlinedTextField(
                                 value = name,
-                                onValueChange = { if (!isStreaming) name = it },
+                                onValueChange = { if (!isActive) name = it },
                                 label = { Text("Display Name") },
-                                enabled = !isStreaming,
+                                enabled = !isActive,
                                 modifier = Modifier.weight(2f),
                                 colors = OutlinedTextFieldDefaults.colors(
                                     focusedBorderColor = MaterialTheme.colorScheme.primary,
@@ -809,7 +918,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
                                 val contentColor = if (isSelected) Color(0xFF11111B) else Color(0xFFCDD6F4)
                                 Button(
                                     onClick = {
-                                        if (!isStreaming) {
+                                        if (!isActive) {
                                             selectedProfile = profile
                                             // activeProfile is synced via LaunchedEffect(selectedProfile)
                                             encodersReady = false
