@@ -46,7 +46,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.foundation.Canvas
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -80,6 +80,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
     }
 
     private val isStreamingState = mutableStateOf(false)
+    private val isProcessingState = mutableStateOf(false)
     private val isAudioEnabledState = mutableStateOf(true)
     private val logs = mutableStateListOf<String>()
     // Orientation control — landscape is the default; portrait is opt-in per session
@@ -222,17 +223,23 @@ class MainActivity : ComponentActivity(), ConnectChecker {
 
     override fun onConnectionSuccess() {
         logMessage("Connection successful!")
-        runOnUiThread { isStreamingState.value = true }
+        runOnUiThread {
+            isStreamingState.value = true
+            isProcessingState.value = false
+        }
     }
 
     override fun onConnectionFailed(reason: String) {
         logMessage("Connection failed: $reason")
+        runOnUiThread { isProcessingState.value = true }
         lifecycleScope.launch(Dispatchers.IO) {
             srtCamera2?.stopStream()
+            srtCamera2?.stopPreview()
             withContext(Dispatchers.Main) {
                 isStreamingState.value = false
                 encodersReady = false
                 startCameraPreview()
+                isProcessingState.value = false
                 Toast.makeText(this@MainActivity, "Connection Failed: $reason", Toast.LENGTH_LONG).show()
             }
         }
@@ -242,12 +249,15 @@ class MainActivity : ComponentActivity(), ConnectChecker {
 
     override fun onDisconnect() {
         logMessage("Disconnected from server.")
+        runOnUiThread { isProcessingState.value = true }
         lifecycleScope.launch(Dispatchers.IO) {
             srtCamera2?.stopStream()
+            srtCamera2?.stopPreview()
             withContext(Dispatchers.Main) {
                 isStreamingState.value = false
                 encodersReady = false
                 startCameraPreview()
+                isProcessingState.value = false
             }
         }
     }
@@ -257,16 +267,23 @@ class MainActivity : ComponentActivity(), ConnectChecker {
 
     private fun toggleStream(ip: String, portString: String, name: String) {
         if (srtCamera2 == null) return
+        if (isProcessingState.value) {
+            logMessage("Ignoring tap: processing previous action")
+            return
+        }
 
         if (isStreamingState.value) {
             logMessage("Stopping stream...")
+            isProcessingState.value = true
             isStreamingState.value = false
             encodersReady = false
             // Use lifecycleScope so stopStream() runs on IO without racing lifecycle callbacks
             lifecycleScope.launch(Dispatchers.IO) {
                 srtCamera2?.stopStream()
+                srtCamera2?.stopPreview()
                 withContext(Dispatchers.Main) {
                     startCameraPreview()
+                    isProcessingState.value = false
                 }
             }
             return
@@ -296,7 +313,21 @@ class MainActivity : ComponentActivity(), ConnectChecker {
         logMessage("Connecting to $srtUrl")
         // Do NOT set isStreamingState=true here — wait for onConnectionSuccess() so
         // the UI never shows LIVE while still connecting or after a failed attempt.
-        srtCamera2?.startStream(srtUrl)
+        isProcessingState.value = true
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                srtCamera2?.startStream(srtUrl)
+            } catch (e: Exception) {
+                logMessage("startStream failed: ${e.message}")
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@MainActivity, "Stream start failed: ${e.message}", Toast.LENGTH_LONG).show()
+                    isStreamingState.value = false
+                    encodersReady = false
+                    isProcessingState.value = false
+                    startCameraPreview()
+                }
+            }
+        }
     }
 
     private fun switchCamera() {
@@ -611,7 +642,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
                         modifier = Modifier.size(48.dp)
                     ) {
                         Icon(
-                            imageVector = Icons.Default.List,
+                            imageVector = Icons.AutoMirrored.Filled.List,
                             contentDescription = "Connection Logs",
                             tint = MaterialTheme.colorScheme.secondary
                         )
@@ -667,7 +698,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
                         modifier = Modifier.size(48.dp)
                     ) {
                         Icon(
-                            imageVector = Icons.Default.List,
+                            imageVector = Icons.AutoMirrored.Filled.List,
                             contentDescription = "Connection Logs",
                             tint = MaterialTheme.colorScheme.secondary
                         )
