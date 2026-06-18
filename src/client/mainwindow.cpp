@@ -217,8 +217,12 @@ void MainWindow::discoverDevices()
         QString output = QString::fromUtf8(arecordProc.readAllStandardOutput());
         QStringList lines = output.split('\n');
         for (const QString &line : lines) {
+            // Filter out continuation lines (start with space before trimming)
+            // and exclude devices containing colons or "HW" which are hardware
+            // identifiers rather than user-friendly device names
+            if (line.startsWith(" ") || line.trimmed().isEmpty()) continue;
             QString trimmed = line.trimmed();
-            if (!trimmed.isEmpty() && !trimmed.startsWith(" ") && !trimmed.startsWith("null") && !trimmed.contains(":") && !trimmed.contains("HW")) {
+            if (!trimmed.startsWith("null") && !trimmed.contains(":") && !trimmed.contains("HW")) {
                 m_audioCombo->addItem(trimmed, trimmed);
             }
         }
@@ -347,6 +351,11 @@ void MainWindow::startStreaming()
         audioDev = m_audioCombo->currentText();
     }
 
+    if (videoDev.isEmpty() || audioDev.isEmpty()) {
+        QMessageBox::warning(this, "Input Error", "Please select a video and audio device.");
+        return;
+    }
+
     QStringList arguments;
 
 #if defined(Q_OS_LINUX)
@@ -403,7 +412,10 @@ void MainWindow::stopStreaming()
     if (!m_streamProcess->waitForFinished(3000)) {
         logMessage("FFmpeg did not stop gracefully, forcing kill...");
         m_streamProcess->kill();
+        m_streamProcess->waitForFinished(3000);
     }
+
+    m_isStreaming = false;
 }
 
 void MainWindow::onProcessReadyReadStandardError()

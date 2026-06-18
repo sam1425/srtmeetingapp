@@ -492,10 +492,12 @@ private:
 
         p->active = false;
 
-        // Close sockets (atomically, prevents double-close)
-        close_srt_socket_once(p->client_socket);
-        close_srt_socket_once(p->obs_socket);
+        // Close sockets (atomically, prevents double-close).
+        // Close loopback_listener FIRST so OBS Media Source can't reconnect
+        // when obs_socket drops (which would cause a black frame moment).
         close_srt_socket_once(p->loopback_listener);
+        close_srt_socket_once(p->obs_socket);
+        close_srt_socket_once(p->client_socket);
 
         // Join or detach the relay thread
         if (p->relay_thread) {
@@ -663,11 +665,17 @@ bool obs_module_load(void)
 void obs_module_unload(void)
 {
     obs_frontend_remove_event_callback(obssrt_frontend_event, nullptr);
+
+    // Stop broker first so no participant UI updates happen after dock is removed
+    s_broker.stop();
+
     if (s_dock_widget) {
         obs_frontend_remove_dock("srtMeetingControlDock");
+        delete s_dock_widget;
         s_dock_widget = nullptr;
     }
-    s_broker.stop();
+    s_participants_list = nullptr;
+
     obs_log(LOG_INFO, "SRT Meeting plugin unloaded");
 }
 
@@ -710,9 +718,13 @@ void create_obs_srt_source_task(void *param) {
                 // Create native Media Source
                 obs_source_t *srt_source = obs_source_create("ffmpeg_source", source_name.c_str(), settings, nullptr);
                 if (srt_source) {
-                    obs_scene_add(scene, srt_source);
+                    obs_sceneitem_t *scene_item = obs_scene_add(scene, srt_source);
+                    if (scene_item) {
+                        obs_log(LOG_INFO, "Added SRT source '%s' to current scene", source_name.c_str());
+                    } else {
+                        obs_log(LOG_ERROR, "Failed to add SRT source '%s' to scene", source_name.c_str());
+                    }
                     obs_source_release(srt_source);
-                    obs_log(LOG_INFO, "Added SRT source '%s' to current scene", source_name.c_str());
                 } else {
                     obs_log(LOG_ERROR, "Failed to create OBS source '%s'", source_name.c_str());
                 }
