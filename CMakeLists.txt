@@ -16,8 +16,24 @@ add_library(${CMAKE_PROJECT_NAME} MODULE)
 find_package(libobs REQUIRED)
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::libobs)
 
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(SRT REQUIRED srt)
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+  pkg_check_modules(SRT REQUIRED srt)
+else()
+  message(STATUS "PkgConfig not found, searching for SRT directly...")
+  find_path(SRT_INCLUDE_DIRS srt/srt.h
+    PATHS ${CMAKE_PREFIX_PATH}
+    PATH_SUFFIXES include
+  )
+  find_library(SRT_LIBRARIES srt
+    PATHS ${CMAKE_PREFIX_PATH}
+    PATH_SUFFIXES lib lib64
+  )
+  if(NOT SRT_INCLUDE_DIRS OR NOT SRT_LIBRARIES)
+    message(FATAL_ERROR "SRT not found via PkgConfig or direct search. Provide SRT_INCLUDE_DIRS/SRT_LIBRARIES.")
+  endif()
+  message(STATUS "Found SRT: ${SRT_LIBRARIES}")
+endif()
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE ${SRT_LIBRARIES})
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ${SRT_INCLUDE_DIRS})
 
