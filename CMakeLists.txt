@@ -38,6 +38,10 @@ endif()
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE ${SRT_LIBRARIES})
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ${SRT_INCLUDE_DIRS})
 
+if(WIN32)
+  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE ws2_32)
+endif()
+
 if(ENABLE_FRONTEND_API)
   find_package(obs-frontend-api REQUIRED)
   target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::obs-frontend-api)
