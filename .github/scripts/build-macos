@@ -88,6 +88,8 @@ build() {
 
   check_macos
 
+  eval "$(brew shellenv)"
+
   local product_name
   local product_version
   read -r product_name product_version <<< \
