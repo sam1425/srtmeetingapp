@@ -16,8 +16,8 @@
     },
     {
       "name": "macos",
-      "displayName": "macOS Universal",
-      "description": "Build for macOS 12.0+ (Universal binary)",
+      "displayName": "macOS ARM64",
+      "description": "Build for macOS 14.0+ (Apple Silicon)",
       "inherits": ["template"],
       "binaryDir": "${sourceDir}/build_macos",
       "condition": {
@@ -28,8 +28,8 @@
       "generator": "Xcode",
       "warnings": {"dev": true, "deprecated": true},
       "cacheVariables": {
-        "CMAKE_OSX_DEPLOYMENT_TARGET": "12.0",
-        "CMAKE_OSX_ARCHITECTURES": "arm64;x86_64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "14.0",
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
         "CODESIGN_IDENTITY": "$penv{CODESIGN_IDENT}",
         "CODESIGN_TEAM": "$penv{CODESIGN_TEAM}"
       }
@@ -37,8 +37,8 @@
     {
       "name": "macos-ci",
       "inherits": ["macos"],
-      "displayName": "macOS Universal CI build",
-      "description": "Build for macOS 12.0+ (Universal binary) for CI",
+      "displayName": "macOS ARM64 CI build",
+      "description": "Build for macOS 14.0+ (Apple Silicon) for CI",
       "generator": "Xcode",
       "cacheVariables": {
         "CMAKE_COMPILE_WARNING_AS_ERROR": true,
@@ -103,15 +103,15 @@
     {
       "name": "macos",
       "configurePreset": "macos",
-      "displayName": "macOS Universal",
-      "description": "macOS build for Universal architectures",
+      "displayName": "macOS ARM64",
+      "description": "macOS build for Apple Silicon",
       "configuration": "RelWithDebInfo"
     },
     {
       "name": "macos-ci",
       "configurePreset": "macos-ci",
-      "displayName": "macOS Universal CI",
-      "description": "macOS CI build for Universal architectures",
+      "displayName": "macOS ARM64 CI",
+      "description": "macOS CI build for Apple Silicon",
       "configuration": "RelWithDebInfo"
     },
     {

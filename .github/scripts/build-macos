@@ -129,9 +129,8 @@ build() {
   }
 
   local -a build_args=(
-    ONLY_ACTIVE_ARCH=NO
+    ONLY_ACTIVE_ARCH=YES
     -arch arm64
-    -arch x86_64
     -project ${product_name}.xcodeproj
     -target ${product_name}
     -destination "generic/platform=macOS,name=Any Mac"
