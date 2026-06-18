@@ -277,6 +277,27 @@ jobs:
           "pluginName=${ProductName}" >> $env:GITHUB_OUTPUT
           "pluginVersion=${ProductVersion}" >> $env:GITHUB_OUTPUT
 
+      - name: Set Up Windows Codesigning 🔑
+        if: fromJSON(needs.check-event.outputs.codesign)
+        id: codesign
+        env:
+          WINDOWS_SIGNING_CERT: ${{ secrets.WINDOWS_SIGNING_CERT }}
+        run: |
+          # Set Up Windows Codesigning 🔑
+          if ( $Env:RUNNER_DEBUG -ne $null ) {
+            Set-PSDebug -Trace 1
+          }
+
+          if ( $Env:WINDOWS_SIGNING_CERT ) {
+            $CertBytes = [Convert]::FromBase64String($Env:WINDOWS_SIGNING_CERT)
+            $CertPath = Join-Path $Env:RUNNER_TEMP "codesign.pfx"
+            [IO.File]::WriteAllBytes($CertPath, $CertBytes)
+            "certPath=${CertPath}" >> $env:GITHUB_OUTPUT
+            Write-Debug "Codesigning certificate written to ${CertPath}"
+          } else {
+            "certPath=" >> $env:GITHUB_OUTPUT
+          }
+
       - name: Build Plugin 🧱
         uses: ./.github/actions/build-plugin
         with:
@@ -289,9 +310,6 @@ jobs:
           target: x64
           config: ${{ needs.check-event.outputs.config }}
           package: ${{ fromJSON(needs.check-event.outputs.package) }}
-
-      - name: Upload Artifacts 📡
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.setup.outputs.pluginName }}-${{ steps.setup.outputs.pluginVersion }}-windows-x64-${{ needs.check-event.outputs.commitHash }}
-          path: ${{ github.workspace }}/release/${{ steps.setup.outputs.pluginName }}-${{ steps.setup.outputs.pluginVersion }}-windows-x64*.*
+          codesign: ${{ fromJSON(needs.check-event.outputs.codesign) }}
+          windowsCodesignCertPath: ${{ steps.codesign.outputs.certPath }}
+          windowsCodesignPassword: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}

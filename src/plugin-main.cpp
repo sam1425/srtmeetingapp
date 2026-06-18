@@ -652,7 +652,7 @@ static void setup_plugin_dock(int broker_port) {
 
     layout->addWidget(latency_row);
 
-    QObject::connect(latency_spin, QOverload<int>::of(&QSpinBox::valueChanged), [](int val) {
+    QObject::connect(latency_spin, &QSpinBox::valueChanged, [](int val) {
         s_default_latency_ms.store(val);
         obs_log(LOG_INFO, "Default latency changed to %d ms", val);
     });

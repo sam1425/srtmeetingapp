@@ -36,6 +36,14 @@ inputs:
     description: Apple ID password for notarization (macOS only)
     required: false
     default: ''
+  windowsCodesignCertPath:
+    description: Path to Windows code signing certificate (PFX)
+    required: false
+    default: ''
+  windowsCodesignPassword:
+    description: Password for Windows code signing certificate
+    required: false
+    default: ''
   package:
     description: Create Windows or macOS installation package
     required: false
@@ -108,6 +116,11 @@ runs:
         $PackageArgs = @{
           Target = '${{ inputs.target }}'
           Configuration = '${{ inputs.config }}'
+        }
+
+        if ( '${{ inputs.codesign }}' -eq 'true' -and '${{ inputs.windowsCodesignCertPath }}' ) {
+          $PackageArgs.CodesignPath = '${{ inputs.windowsCodesignCertPath }}'
+          $PackageArgs.CodesignPassword = '${{ inputs.windowsCodesignPassword }}'
         }
 
         .github/scripts/Package-Windows.ps1 @PackageArgs
