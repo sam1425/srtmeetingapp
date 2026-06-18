@@ -74,8 +74,7 @@ jobs:
           variants=(
             'windows-x64;zip|exe'
             'macos-universal;tar.xz|pkg'
-            'ubuntu-24.04-x86_64;tar.xz|deb|ddeb'
-            'sources;tar.xz'
+            'ubuntu-24.04-x86_64;tar.xz'
           )
 
           for variant_data in "${variants[@]}"; do
@@ -114,6 +113,4 @@ jobs:
             ${{ github.workspace }}/*.exe
             ${{ github.workspace }}/*.zip
             ${{ github.workspace }}/*.pkg
-            ${{ github.workspace }}/*.deb
-            ${{ github.workspace }}/*.ddeb
             ${{ github.workspace }}/*.tar.xz
