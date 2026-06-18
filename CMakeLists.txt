@@ -90,10 +90,12 @@ if(ENABLE_FORMAT_CHECK AND NOT WIN32)
   endif()
 endif()
 
-install(TARGETS ${CMAKE_PROJECT_NAME} LIBRARY DESTINATION bin/64bit RUNTIME DESTINATION bin/64bit)
+if(WIN32)
+  install(TARGETS ${CMAKE_PROJECT_NAME} LIBRARY DESTINATION bin/64bit RUNTIME DESTINATION bin/64bit)
 
-if(TARGET obs-srt-meeting-client)
-  install(TARGETS obs-srt-meeting-client RUNTIME DESTINATION bin/64bit)
+  if(TARGET obs-srt-meeting-client)
+    install(TARGETS obs-srt-meeting-client RUNTIME DESTINATION bin/64bit)
+  endif()
+
+  install(DIRECTORY data/ DESTINATION data USE_SOURCE_PERMISSIONS)
 endif()
-
-install(DIRECTORY data/ DESTINATION data USE_SOURCE_PERMISSIONS)
