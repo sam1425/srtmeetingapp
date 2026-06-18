@@ -113,14 +113,34 @@ fun MainScreen(
                 fontWeight = FontWeight.Bold,
                 fontFamily = FontFamily.Monospace
             )
-            if (isStreaming) {
+        }
+
+        // Net Indicator (below Live status)
+        if (isStreaming) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(start = 16.dp, top = 52.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color.Black.copy(alpha = 0.6f))
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
                 val qualityColor = when (connectionQuality) {
                     ConnectionQuality.Good -> Color(0xFFA6E3A1)
                     ConnectionQuality.Fair -> Color(0xFFE5C890)
                     ConnectionQuality.Poor -> Color(0xFFE24B4A)
                 }
                 Box(
-                    modifier = Modifier.size(6.dp).clip(CircleShape).background(qualityColor)
+                    modifier = Modifier.size(8.dp).clip(CircleShape).background(qualityColor)
+                )
+                Text(
+                    text = "NET",
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
                 )
             }
         }
