@@ -211,8 +211,8 @@ class MainActivity : ComponentActivity(), ConnectChecker {
         if (!isSurfaceReady || !hasPermissions()) return
         if (srtCamera2?.isOnPreview == true) return
         try {
-            srtCamera2?.startPreview()
             encodersReady = prepareEncoders()
+            srtCamera2?.startPreview()
             logMessage("Camera preview started.")
         } catch (e: Exception) {
             logMessage("Failed to start preview: ${e.message}")
