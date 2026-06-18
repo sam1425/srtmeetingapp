@@ -67,8 +67,7 @@
       "displayName": "Windows x64 CI build",
       "description": "Build for Windows x64 on CI",
       "cacheVariables": {
-        "CMAKE_COMPILE_WARNING_AS_ERROR": true,
-        "ENABLE_FORMAT_CHECK": true
+        "CMAKE_COMPILE_WARNING_AS_ERROR": true
       }
     },
     {

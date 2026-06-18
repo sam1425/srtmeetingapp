@@ -69,7 +69,7 @@ if(ENABLE_QT)
   )
 endif()
 
-if(ENABLE_FORMAT_CHECK)
+if(ENABLE_FORMAT_CHECK AND NOT WIN32)
   set(FORMAT_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/plugin-main.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/client/main.cpp
