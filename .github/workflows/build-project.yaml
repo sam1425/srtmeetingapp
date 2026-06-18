@@ -211,6 +211,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ matrix.os }}-ccache-x86_64-
 
+      - uses: actions/cache/restore@v4
+        id: apt-cache
+        with:
+          path: /var/cache/apt/archives
+          key: ${{ runner.os }}-${{ matrix.os }}-apt-${{ hashFiles('.github/scripts/.Aptfile', '.github/scripts/utils.zsh/setup_linux') }}
+
       - name: Build Plugin 🧱
         uses: ./.github/actions/build-plugin
         with:
@@ -229,6 +235,12 @@ jobs:
         with:
           name: ${{ steps.setup.outputs.pluginName }}-${{ steps.setup.outputs.pluginVersion }}-${{ matrix.os }}-x86_64-${{ needs.check-event.outputs.commitHash }}
           path: ${{ github.workspace }}/release/${{ steps.setup.outputs.pluginName }}-${{ steps.setup.outputs.pluginVersion }}-x86_64*.*
+
+      - uses: actions/cache/save@v4
+        if: github.event_name != 'pull_request' && steps.apt-cache.outputs.cache-hit != 'true'
+        with:
+          path: /var/cache/apt/archives
+          key: ${{ runner.os }}-${{ matrix.os }}-apt-${{ hashFiles('.github/scripts/.Aptfile', '.github/scripts/utils.zsh/setup_linux') }}
 
       - uses: actions/cache/save@v4
         if: github.event_name != 'pull_request' && steps.ccache-cache.outputs.cache-hit != 'true'
