@@ -25,14 +25,8 @@ if(PkgConfig_FOUND)
   endif()
 else()
   message(STATUS "PkgConfig not found, searching for SRT directly...")
-  find_path(SRT_INCLUDE_DIRS srt/srt.h
-    PATHS ${CMAKE_PREFIX_PATH}
-    PATH_SUFFIXES include
-  )
-  find_library(SRT_LIBRARIES srt
-    PATHS ${CMAKE_PREFIX_PATH}
-    PATH_SUFFIXES lib lib64
-  )
+  find_path(SRT_INCLUDE_DIRS srt/srt.h PATHS ${CMAKE_PREFIX_PATH} PATH_SUFFIXES include)
+  find_library(SRT_LIBRARIES srt PATHS ${CMAKE_PREFIX_PATH} PATH_SUFFIXES lib lib64)
   if(NOT SRT_INCLUDE_DIRS OR NOT SRT_LIBRARIES)
     message(FATAL_ERROR "SRT not found via PkgConfig or direct search. Provide SRT_INCLUDE_DIRS/SRT_LIBRARIES.")
   endif()
@@ -77,15 +71,16 @@ if(ENABLE_QT)
 endif()
 
 if(ENABLE_FORMAT_CHECK AND NOT WIN32)
-  set(FORMAT_SOURCES
+  set(
+    FORMAT_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/plugin-main.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/client/main.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/client/mainwindow.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/client/mainwindow.h
   )
-  add_custom_target(check-format
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/build-aux/run-clang-format
-      --check --fail-on-change ${FORMAT_SOURCES}
+  add_custom_target(
+    check-format
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/build-aux/run-clang-format --check --fail-on-change ${FORMAT_SOURCES}
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     COMMENT "Checking C++ formatting with clang-format..."
   )
@@ -95,18 +90,10 @@ if(ENABLE_FORMAT_CHECK AND NOT WIN32)
   endif()
 endif()
 
-install(TARGETS ${CMAKE_PROJECT_NAME}
-  LIBRARY DESTINATION bin/64bit
-  RUNTIME DESTINATION bin/64bit
-)
+install(TARGETS ${CMAKE_PROJECT_NAME} LIBRARY DESTINATION bin/64bit RUNTIME DESTINATION bin/64bit)
 
 if(TARGET obs-srt-meeting-client)
-  install(TARGETS obs-srt-meeting-client
-    RUNTIME DESTINATION bin/64bit
-  )
+  install(TARGETS obs-srt-meeting-client RUNTIME DESTINATION bin/64bit)
 endif()
 
-install(DIRECTORY data/
-  DESTINATION data
-  USE_SOURCE_PERMISSIONS
-)
+install(DIRECTORY data/ DESTINATION data USE_SOURCE_PERMISSIONS)
