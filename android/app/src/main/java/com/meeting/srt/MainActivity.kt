@@ -98,7 +98,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
 
     // ── Reconnection infrastructure ────────────────────────────────────
     private var reconnectJob: Job? = null
-    private var lastSrtUrl: String? = null
+    @Volatile private var lastSrtUrl: String? = null
     companion object {
         private const val MAX_RECONNECT_ATTEMPTS = 5
         private const val INITIAL_BACKOFF_MS = 1000L
@@ -250,12 +250,18 @@ class MainActivity : ComponentActivity(), ConnectChecker {
     override fun onConnectionFailed(reason: String) {
         logMessage("Connection failed: $reason")
         val currentState = streamState.value
-        // If the user pressed stop (Stopping) or we're already idle, don't reconnect
+        // Bug fix: The reconnect loop owns its own retry counter. If we call
+        // startReconnect() here while Reconnecting, it cancels the current job
+        // and resets the attempt counter to 1, making MAX_RECONNECT_ATTEMPTS
+        // unreachable. Let the running loop handle the retry instead.
+        if (currentState is StreamState.Reconnecting) return
+        // User pressed stop or already idle — just finish teardown
         if (currentState is StreamState.Stopping || currentState is StreamState.Idle) {
             lifecycleScope.launch(Dispatchers.IO) {
                 srtCamera2?.stopStream()
-                srtCamera2?.stopPreview()
+                // Camera2 is main-thread-only: move stopPreview out of IO
                 withContext(Dispatchers.Main) {
+                    srtCamera2?.stopPreview()
                     streamState.value = StreamState.Idle
                     encodersReady = false
                     startCameraPreview()
@@ -263,11 +269,11 @@ class MainActivity : ComponentActivity(), ConnectChecker {
             }
             return
         }
-        // Otherwise, attempt auto-reconnect
+        // First failure from Connecting/Streaming → begin auto-reconnect
         lifecycleScope.launch(Dispatchers.IO) {
             srtCamera2?.stopStream()
-            srtCamera2?.stopPreview()
             withContext(Dispatchers.Main) {
+                srtCamera2?.stopPreview()
                 encodersReady = false
                 startCameraPreview()
                 Toast.makeText(this@MainActivity, "Connection Failed: $reason", Toast.LENGTH_SHORT).show()
@@ -281,24 +287,21 @@ class MainActivity : ComponentActivity(), ConnectChecker {
     override fun onDisconnect() {
         logMessage("Disconnected from server.")
         val currentState = streamState.value
-        // If the user pressed stop, just finish the teardown
-        if (currentState is StreamState.Stopping || currentState is StreamState.Idle) {
-            lifecycleScope.launch(Dispatchers.IO) {
-                srtCamera2?.stopStream()
-                srtCamera2?.stopPreview()
-                withContext(Dispatchers.Main) {
-                    streamState.value = StreamState.Idle
-                    encodersReady = false
-                    startCameraPreview()
-                }
-            }
+        // Bug fix: RootEncoder can fire onConnectionFailed then onDisconnect in
+        // rapid succession for the same event. If onConnectionFailed already set
+        // us to Stopping/Reconnecting/Idle, we must not start a second teardown
+        // — that causes a double stopStream() race and corrupts the encoder state.
+        if (currentState is StreamState.Reconnecting ||
+            currentState is StreamState.Stopping ||
+            currentState is StreamState.Idle) {
+            logMessage("Disconnect received (already handled by onConnectionFailed)")
             return
         }
-        // Unexpected disconnect while streaming → try to reconnect
+        // Unexpected disconnect while Streaming/Connecting → try to reconnect
         lifecycleScope.launch(Dispatchers.IO) {
             srtCamera2?.stopStream()
-            srtCamera2?.stopPreview()
             withContext(Dispatchers.Main) {
+                srtCamera2?.stopPreview()
                 encodersReady = false
                 startCameraPreview()
                 startReconnect()
@@ -394,8 +397,9 @@ class MainActivity : ComponentActivity(), ConnectChecker {
             encodersReady = false
             lifecycleScope.launch(Dispatchers.IO) {
                 srtCamera2?.stopStream()
-                srtCamera2?.stopPreview()
+                // Camera2 is main-thread-only: stopPreview must not run on IO
                 withContext(Dispatchers.Main) {
+                    srtCamera2?.stopPreview()
                     streamState.value = StreamState.Idle
                     startCameraPreview()
                 }

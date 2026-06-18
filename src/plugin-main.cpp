@@ -1,8 +1,3 @@
-/*
-OBS SRT Meeting App Plugin
-Copyright (C) 2026 Antigravity Team
-*/
-
 #include <obs-module.h>
 #include <obs-frontend-api.h>
 #include <plugin-support.h>
@@ -10,6 +5,7 @@ Copyright (C) 2026 Antigravity Team
 
 #include <thread>
 #include <mutex>
+#include <future>
 #include <vector>
 #include <string>
 #include <map>
@@ -143,25 +139,25 @@ public:
         if (!running) return;
         running = false;
 
-        if (listener_socket != SRT_INVALID_SOCK) {
-            srt_close(listener_socket);
-            listener_socket = SRT_INVALID_SOCK;
-        }
+        // Bug fix: listener_socket is now atomic — use close_srt_socket_once
+        // so stop() and listen_loop() can never double-close it.
+        close_srt_socket_once(listener_socket);
 
         if (listener_thread && listener_thread->joinable()) {
             listener_thread->join();
             listener_thread.reset();
         }
 
-        // Join all handler threads (handle_new_publisher threads)
+        // Wait for all handle_new_publisher tasks to complete.
+        // Bug fix: replaced std::thread vector with std::future vector because
+        // a finished std::thread is still joinable() — the old pruning logic
+        // (if (!t.joinable()) erase) never removed anything, growing forever.
         {
-            std::lock_guard<std::mutex> lock(handler_threads_mutex);
-            for (auto &t : handler_threads) {
-                if (t.joinable()) {
-                    t.join();
-                }
+            std::lock_guard<std::mutex> lock(handler_futures_mutex);
+            for (auto &f : handler_futures) {
+                f.wait();
             }
-            handler_threads.clear();
+            handler_futures.clear();
         }
 
         // Clean up all active participants
@@ -188,7 +184,11 @@ private:
         while (running) {
             sockaddr_in client_addr;
             int addr_len = sizeof(client_addr);
-            SRTSOCKET client_sock = srt_accept(listener_socket, (struct sockaddr*)&client_addr, &addr_len);
+            // Bug fix: listener_socket is atomic — load before passing to srt_accept
+            // so stop()'s close_srt_socket_once() never races a live read.
+            SRTSOCKET ls = listener_socket.load();
+            if (ls == SRT_INVALID_SOCK) break;
+            SRTSOCKET client_sock = srt_accept(ls, (struct sockaddr*)&client_addr, &addr_len);
             if (client_sock == SRT_INVALID_SOCK) {
                 if (running) {
                     obs_log(LOG_WARNING, "Accept failed: %s", srt_getlasterror_str());
@@ -232,18 +232,23 @@ private:
                     continue;
                 }
 
-                // Launch handling on a tracked thread to not block incoming connections
+                // Launch handling without blocking the accept loop.
+                // Bug fix: use std::future instead of std::thread — a finished
+                // std::thread is still joinable(), so the old pruning condition
+                // `!it->joinable()` was always false and never removed anything.
+                // std::future::wait_for(0s) returns ready only when truly done.
                 {
-                    std::lock_guard<std::mutex> lock(handler_threads_mutex);
-                    // Prune finished handler threads before adding a new one
-                    for (auto it = handler_threads.begin(); it != handler_threads.end(); ) {
-                        if (!it->joinable()) {
-                            it = handler_threads.erase(it);
+                    std::lock_guard<std::mutex> lock(handler_futures_mutex);
+                    // Prune completed tasks (non-blocking zero-wait check)
+                    for (auto it = handler_futures.begin(); it != handler_futures.end(); ) {
+                        if (it->wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                            it = handler_futures.erase(it);
                         } else {
                             ++it;
                         }
                     }
-                    handler_threads.emplace_back(&SRTBroker::handle_new_publisher, this, username, client_sock);
+                    handler_futures.push_back(std::async(std::launch::async,
+                        &SRTBroker::handle_new_publisher, this, username, client_sock));
                 }
             } else {
                 obs_log(LOG_WARNING, "Invalid StreamID. Expected 'publish:<name>', got '%s'", stream_id);
@@ -347,21 +352,48 @@ private:
         // Accept connection from OBS Media Source
         sockaddr_in obs_addr;
         int addr_len = sizeof(obs_addr);
-        
-        // Wait for OBS to connect (with a 10s timeout)
-        int timeout_ms = 10000;
+
+        // Bug fix: SRTO_RCVTIMEO only applies to srt_recv*, NOT srt_accept().
+        // The old code set a receive timeout that had zero effect on the accept
+        // call, so if OBS never connected this thread would block forever and
+        // stop() would deadlock trying to join it.
+        // Fix: use srt_epoll_wait which correctly timeouts the accept readiness.
+        SRTSOCKET obs_sock = SRT_INVALID_SOCK;
         SRTSOCKET lb_sock = participant->loopback_listener.load();
         if (lb_sock != SRT_INVALID_SOCK) {
-            srt_setsockopt(lb_sock, 0, SRTO_RCVTIMEO, &timeout_ms, sizeof(timeout_ms));
-        }
-        
-        SRTSOCKET obs_sock = SRT_INVALID_SOCK;
-        lb_sock = participant->loopback_listener.load();
-        if (lb_sock != SRT_INVALID_SOCK) {
-            obs_sock = srt_accept(lb_sock, (struct sockaddr*)&obs_addr, &addr_len);
+            int epoll_id = srt_epoll_create();
+            if (epoll_id < 0) {
+                obs_log(LOG_ERROR, "srt_epoll_create failed: %s", srt_getlasterror_str());
+            } else {
+                int events = SRT_EPOLL_IN | SRT_EPOLL_ERR;
+                srt_epoll_add_usock(epoll_id, lb_sock, &events);
+
+                SRTSOCKET ready[1];
+                int nready = 1;
+                // Wait up to 10 s for OBS media source to connect
+                int wait_result = srt_epoll_wait(epoll_id,
+                    ready, &nready,          // read-ready set
+                    nullptr, nullptr,        // write-ready set (unused)
+                    10000,                   // timeout ms
+                    nullptr, nullptr,        // system sockets (unused)
+                    nullptr, nullptr);
+                srt_epoll_release(epoll_id);
+
+                if (wait_result > 0 && nready > 0) {
+                    lb_sock = participant->loopback_listener.load();
+                    if (lb_sock != SRT_INVALID_SOCK) {
+                        obs_sock = srt_accept(lb_sock, (struct sockaddr*)&obs_addr, &addr_len);
+                    }
+                } else {
+                    obs_log(LOG_ERROR,
+                        "Timed out waiting 10s for OBS to connect on loopback port %d",
+                        loopback_port);
+                }
+            }
         }
         if (obs_sock == SRT_INVALID_SOCK) {
-            obs_log(LOG_ERROR, "OBS failed to connect to loopback listener on port %d: %s", loopback_port, srt_getlasterror_str());
+            obs_log(LOG_ERROR, "OBS failed to connect to loopback listener on port %d: %s",
+                loopback_port, srt_getlasterror_str());
             cleanup_participant(participant);
             return;
         }
@@ -501,11 +533,13 @@ private:
     }
 
     std::atomic<bool> running;
-    SRTSOCKET listener_socket;
+    // Bug fix: was plain SRTSOCKET (int) — written from stop() and read from
+    // listen_loop() on different threads simultaneously (data race / UB).
+    std::atomic<SRTSOCKET> listener_socket;
     std::unique_ptr<std::thread> listener_thread;
 
-    std::mutex handler_threads_mutex;
-    std::vector<std::thread> handler_threads;
+    std::mutex handler_futures_mutex;
+    std::vector<std::future<void>> handler_futures;
 
     std::mutex participants_mutex;
     std::map<std::string, std::shared_ptr<Participant>> participants;
