@@ -301,6 +301,11 @@ jobs:
           windowsCodesignCertPath: ${{ steps.codesign.outputs.certPath }}
           windowsCodesignPassword: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}
 
+      - name: List Release Files 📋
+        shell: pwsh
+        run: |
+          Get-ChildItem -Path "${{ github.workspace }}/release/" -Force | Select-Object Name, Length | Format-Table -AutoSize
+
       - name: Upload Artifacts 📡
         uses: actions/upload-artifact@v4
         with:
