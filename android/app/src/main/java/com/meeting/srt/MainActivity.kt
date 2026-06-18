@@ -2,104 +2,74 @@ package com.meeting.srt
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.os.Bundle
 import android.view.SurfaceHolder
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.*
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import com.meeting.srt.ui.MainScreen
 import com.pedro.common.ConnectChecker
 import com.pedro.library.srt.SrtCamera2
 import com.pedro.library.view.OpenGlView
-import java.text.SimpleDateFormat
-import java.util.*
-import androidx.compose.animation.animateColor
-import androidx.compose.animation.core.*
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.scale
-import androidx.compose.foundation.shape.CircleShape
-import android.content.res.Configuration
-import androidx.compose.ui.platform.LocalConfiguration
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.automirrored.filled.List
-import androidx.compose.foundation.Canvas
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import android.content.pm.ActivityInfo
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.ui.input.pointer.pointerInput
-
-// ── Stream state machine ───────────────────────────────────────────────
-sealed class StreamState {
-    object Idle : StreamState()
-    object Connecting : StreamState()
-    object Streaming : StreamState()
-    object Stopping : StreamState()
-    data class Reconnecting(val attempt: Int, val maxAttempts: Int) : StreamState()
-}
+import java.text.SimpleDateFormat
+import java.util.*
 
 class MainActivity : ComponentActivity(), ConnectChecker {
 
     private var srtCamera2: SrtCamera2? = null
     private var openGlView: OpenGlView? = null
-    private var isSurfaceReady = false
+    @Volatile private var isSurfaceReady = false
     @Volatile private var encodersReady = false
 
-    // Single source of truth for video quality profile — kept in sync with
-    // the Composable's rememberSaveable state via LaunchedEffect, so it
-    // survives both runtime changes and Activity recreation correctly.
+    // ── Reactive state ──────────────────────────────────────────────────
     private val activeProfile = mutableStateOf("High")
+    val streamState = mutableStateOf<StreamState>(StreamState.Idle)
+    val isAudioEnabledState = mutableStateOf(true)
+    val logs = mutableStateListOf<String>()
+    val allowVerticalState = mutableStateOf(false)
+    val isPortraitState = mutableStateOf(false)
+    val connectionQuality = mutableStateOf(ConnectionQuality.Good)
+
+    // ── Connection / form state (survives recomposition) ────────────────
+    private var ip by mutableStateOf("iduai.duckdns.org")
+    private var port by mutableStateOf("9000")
+    private var name by mutableStateOf("Default")
+    private var selectedProfile by mutableStateOf("High")
+    private var latencyMs by mutableStateOf(120)
+    private var latencyAuto by mutableStateOf(true)
 
     private fun dimensionsForProfile(profile: String): Triple<Int, Int, Int> = when (profile) {
         "Medium" -> Triple(854, 480, 1000 * 1024)
         "Low"    -> Triple(640, 360, 500 * 1024)
-        else     -> Triple(1280, 720, 2000 * 1024) // "High" default
+        else     -> Triple(1280, 720, 2000 * 1024)
     }
-
-    private val streamState = mutableStateOf<StreamState>(StreamState.Idle)
-    private val isAudioEnabledState = mutableStateOf(true)
-    private val logs = mutableStateListOf<String>()
-    private val allowVerticalState = mutableStateOf(false)
-    private val isPortraitState = mutableStateOf(false)
 
     // ── Reconnection infrastructure ────────────────────────────────────
     private var reconnectJob: Job? = null
     @Volatile private var lastSrtUrl: String? = null
+
+    // ── Network quality tracking ────────────────────────────────────────
+    private var qualityPollJob: Job? = null
+    @Volatile private var lastActualBitrate = 0L
+    private fun targetBitrate(): Int = dimensionsForProfile(activeProfile.value).third
     companion object {
+        private val dateFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault())
         private const val MAX_RECONNECT_ATTEMPTS = 5
         private const val INITIAL_BACKOFF_MS = 1000L
         private const val MAX_BACKOFF_MS = 15_000L
@@ -119,10 +89,11 @@ class MainActivity : ComponentActivity(), ConnectChecker {
         }
     }
 
+    // ── Lifecycle ───────────────────────────────────────────────────────
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Default to landscape; portrait must be explicitly unlocked in Settings
-        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
 
         val view = OpenGlView(this)
         openGlView = view
@@ -132,8 +103,6 @@ class MainActivity : ComponentActivity(), ConnectChecker {
             override fun surfaceCreated(holder: SurfaceHolder) {
                 logMessage("Surface created.")
                 isSurfaceReady = true
-                // Only start preview here if permissions are already granted;
-                // otherwise the permission callback will trigger it.
                 if (hasPermissions()) startCameraPreview()
             }
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
@@ -145,7 +114,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
 
         setContent {
             MaterialTheme(
-                colorScheme = darkColorScheme(
+                colorScheme = androidx.compose.material3.darkColorScheme(
                     primary = Color(0xFFCBA6F7),
                     secondary = Color(0xFFB4BEFE),
                     background = Color(0xFF1E1E2E),
@@ -158,7 +127,44 @@ class MainActivity : ComponentActivity(), ConnectChecker {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    MainScreen()
+                    MainScreen(
+                        ip = ip,
+                        port = port,
+                        name = name,
+                        selectedProfile = selectedProfile,
+                        latencyMs = latencyMs,
+                        latencyAuto = latencyAuto,
+                        streamState = streamState.value,
+                        connectionQuality = connectionQuality.value,
+                        isAudioEnabled = isAudioEnabledState.value,
+                        allowVertical = allowVerticalState.value,
+                        logs = logs.toList(),
+                        onIpChange = { ip = it },
+                        onPortChange = { port = it },
+                        onNameChange = { name = it },
+                        onProfileChange = {
+                            selectedProfile = it
+                            activeProfile.value = it
+                            encodersReady = false
+                            val (w, h, br) = dimensionsForProfile(it)
+                            logMessage("Selected profile: $it (${w}x${h}, ${br / 1024} Kbps)")
+                        },
+                        onLatencyMsChange = { latencyMs = it },
+                        onLatencyAutoChange = { latencyAuto = it },
+                        onAllowVerticalChange = { enabled ->
+                            allowVerticalState.value = enabled
+                            if (!enabled) {
+                                isPortraitState.value = false
+                                requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                            }
+                        },
+                        onToggleStream = { toggleStream(ip, port, name) },
+                        onToggleAudio = { toggleAudio() },
+                        onSwitchCamera = { switchCamera() },
+                        onToggleOrientation = { toggleOrientation() },
+                        onLogsClear = { logs.clear() },
+                        openGlView = openGlView
+                    )
                 }
             }
         }
@@ -175,6 +181,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
 
     override fun onPause() {
         super.onPause()
+        stopQualityPolling()
         cancelReconnect()
         if (srtCamera2?.isStreaming == true) {
             srtCamera2?.stopStream()
@@ -185,6 +192,8 @@ class MainActivity : ComponentActivity(), ConnectChecker {
         }
         encodersReady = false
     }
+
+    // ── Permissions ────────────────────────────────────────────────────
 
     private fun hasPermissions(): Boolean {
         return ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED &&
@@ -197,19 +206,19 @@ class MainActivity : ComponentActivity(), ConnectChecker {
                 arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
             )
         } else {
-            // Surface may not be ready yet; surfaceCreated callback will call startCameraPreview()
-            // once both conditions are met. Calling here is safe — the guard inside handles it.
             startCameraPreview()
         }
     }
+
+    // ── Camera & encoders ──────────────────────────────────────────────
 
     private fun prepareEncoders(): Boolean {
         val (w, h, br) = dimensionsForProfile(activeProfile.value)
         if (srtCamera2?.prepareVideo(w, h, 30, br, 0) == true &&
             srtCamera2?.prepareAudio(128 * 1024, 44100, true, true, true) == true) {
-                logMessage("Encoders ready: ${w}x${h} @ ${br / 1024} Kbps.")
-                return true
-            }
+            logMessage("Encoders ready: ${w}x${h} @ ${br / 1024} Kbps.")
+            return true
+        }
         logMessage("Failed to prepare encoders.")
         return false
     }
@@ -218,23 +227,24 @@ class MainActivity : ComponentActivity(), ConnectChecker {
         if (!isSurfaceReady || !hasPermissions()) return
         if (srtCamera2?.isOnPreview == true) return
         try {
-            srtCamera2?.startPreview()
             encodersReady = prepareEncoders()
+            srtCamera2?.startPreview()
             logMessage("Camera preview started.")
         } catch (e: Exception) {
             logMessage("Failed to start preview: ${e.message}")
         }
     }
 
+    // ── Logging ────────────────────────────────────────────────────────
+
     private fun logMessage(message: String) {
         android.util.Log.d("MainActivity", message)
         runOnUiThread {
-            val timestamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date())
-            logs.add("[$timestamp] $message")
+            logs.add("[${dateFormat.format(Date())}] $message")
         }
     }
 
-    // ConnectChecker
+    // ── ConnectChecker callbacks ───────────────────────────────────────
 
     override fun onConnectionStarted(url: String) {
         logMessage("Connecting: $url")
@@ -244,66 +254,49 @@ class MainActivity : ComponentActivity(), ConnectChecker {
         logMessage("Connection successful!")
         runOnUiThread {
             streamState.value = StreamState.Streaming
+            startQualityPolling()
         }
     }
 
     override fun onConnectionFailed(reason: String) {
         logMessage("Connection failed: $reason")
         val currentState = streamState.value
-        // Bug fix: The reconnect loop owns its own retry counter. If we call
-        // startReconnect() here while Reconnecting, it cancels the current job
-        // and resets the attempt counter to 1, making MAX_RECONNECT_ATTEMPTS
-        // unreachable. Let the running loop handle the retry instead.
-        if (currentState is StreamState.Reconnecting) return
-        // User pressed stop or already idle — just finish teardown
-        if (currentState is StreamState.Stopping || currentState is StreamState.Idle) {
-            lifecycleScope.launch(Dispatchers.IO) {
-                srtCamera2?.stopStream()
-                // Camera2 is main-thread-only: move stopPreview out of IO
-                withContext(Dispatchers.Main) {
-                    srtCamera2?.stopPreview()
-                    streamState.value = StreamState.Idle
-                    encodersReady = false
-                    startCameraPreview()
-                }
-            }
+        if (currentState is StreamState.Reconnecting) {
             return
         }
-        // First failure from Connecting/Streaming → begin auto-reconnect
+        if (currentState is StreamState.Stopping || currentState is StreamState.Idle) {
+            if (currentState is StreamState.Stopping) streamState.value = StreamState.Idle
+            return
+        }
+        stopQualityPolling()
         lifecycleScope.launch(Dispatchers.IO) {
             srtCamera2?.stopStream()
             withContext(Dispatchers.Main) {
-                srtCamera2?.stopPreview()
                 encodersReady = false
-                startCameraPreview()
                 Toast.makeText(this@MainActivity, "Connection Failed: $reason", Toast.LENGTH_SHORT).show()
                 startReconnect()
             }
         }
     }
 
-    override fun onNewBitrate(bitrate: Long) {}
+    override fun onNewBitrate(bitrate: Long) {
+        lastActualBitrate = bitrate
+    }
 
     override fun onDisconnect() {
         logMessage("Disconnected from server.")
         val currentState = streamState.value
-        // Bug fix: RootEncoder can fire onConnectionFailed then onDisconnect in
-        // rapid succession for the same event. If onConnectionFailed already set
-        // us to Stopping/Reconnecting/Idle, we must not start a second teardown
-        // — that causes a double stopStream() race and corrupts the encoder state.
         if (currentState is StreamState.Reconnecting ||
             currentState is StreamState.Stopping ||
             currentState is StreamState.Idle) {
             logMessage("Disconnect received (already handled by onConnectionFailed)")
             return
         }
-        // Unexpected disconnect while Streaming/Connecting → try to reconnect
+        stopQualityPolling()
         lifecycleScope.launch(Dispatchers.IO) {
             srtCamera2?.stopStream()
             withContext(Dispatchers.Main) {
-                srtCamera2?.stopPreview()
                 encodersReady = false
-                startCameraPreview()
                 startReconnect()
             }
         }
@@ -312,10 +305,8 @@ class MainActivity : ComponentActivity(), ConnectChecker {
     override fun onAuthError() { logMessage("Authentication error.") }
     override fun onAuthSuccess() { logMessage("Authentication successful.") }
 
-    /**
-     * Launch exponential-backoff reconnection. Must be called on the main thread.
-     * Cancels any already-running reconnect coroutine first.
-     */
+    // ── Reconnection ───────────────────────────────────────────────────
+
     private fun startReconnect() {
         val url = lastSrtUrl
         if (url == null) {
@@ -331,20 +322,20 @@ class MainActivity : ComponentActivity(), ConnectChecker {
                 streamState.value = StreamState.Reconnecting(attempt, MAX_RECONNECT_ATTEMPTS)
                 logMessage("Reconnect attempt $attempt/$MAX_RECONNECT_ATTEMPTS in ${backoff / 1000}s...")
                 delay(backoff)
-                // Check if cancelled (user pressed stop) during delay
                 if (streamState.value is StreamState.Stopping || streamState.value is StreamState.Idle) return@launch
-
-                // Ensure encoders are ready
                 if (!encodersReady) {
-                    encodersReady = prepareEncoders()
+                    logMessage("Preparing encoders for reconnect...")
+                    withContext(Dispatchers.Main) {
+                        encodersReady = prepareEncoders()
+                    }
+                    if (!encodersReady) {
+                        logMessage("Reconnect: encoders not ready, waiting...")
+                        delay(2000)
+                        attempt++
+                        backoff = (backoff * 2).coerceAtMost(MAX_BACKOFF_MS)
+                        continue
+                    }
                 }
-                if (!encodersReady) {
-                    logMessage("Reconnect: encoders not ready, retrying...")
-                    attempt++
-                    backoff = (backoff * 2).coerceAtMost(MAX_BACKOFF_MS)
-                    continue
-                }
-
                 logMessage("Reconnecting to $url")
                 withContext(Dispatchers.IO) {
                     try {
@@ -353,9 +344,6 @@ class MainActivity : ComponentActivity(), ConnectChecker {
                         logMessage("Reconnect startStream failed: ${e.message}")
                     }
                 }
-                // After startStream, onConnectionSuccess or onConnectionFailed will fire.
-                // If success, streamState becomes Streaming and this loop exits naturally.
-                // Wait a bit to see which callback fires before deciding.
                 delay(3000)
                 if (streamState.value is StreamState.Streaming) {
                     logMessage("Reconnection successful!")
@@ -364,7 +352,6 @@ class MainActivity : ComponentActivity(), ConnectChecker {
                 attempt++
                 backoff = (backoff * 2).coerceAtMost(MAX_BACKOFF_MS)
             }
-            // Exhausted all attempts
             logMessage("Reconnection failed after $MAX_RECONNECT_ATTEMPTS attempts.")
             withContext(Dispatchers.Main) {
                 streamState.value = StreamState.Idle
@@ -373,41 +360,71 @@ class MainActivity : ComponentActivity(), ConnectChecker {
         }
     }
 
-    /** Cancel any running reconnect coroutine. Safe to call from any thread. */
     private fun cancelReconnect() {
         reconnectJob?.cancel()
         reconnectJob = null
     }
 
+    // ── Network quality polling ─────────────────────────────────────────
+
+    private fun startQualityPolling() {
+        qualityPollJob?.cancel()
+        qualityPollJob = lifecycleScope.launch {
+            var prevDropped = 0L
+            var prevSent = 0L
+            while (isActive) {
+                delay(4000)
+                if (streamState.value !is StreamState.Streaming) break
+                val client = srtCamera2?.getStreamClient() ?: break
+                val congestion = client.hasCongestion(0.5f)
+                val cacheSize = client.getCacheSize()
+                val cachePct = if (cacheSize > 0) client.getItemsInCache().toFloat() / cacheSize else 0f
+                val dropped = client.getDroppedVideoFrames() + client.getDroppedAudioFrames()
+                val sent = client.getSentVideoFrames() + client.getSentAudioFrames()
+                val dropDelta = dropped - prevDropped
+                val sentDelta = sent - prevSent
+                prevDropped = dropped
+                prevSent = sent
+                val dropRate = if (sentDelta > 0) dropDelta.toFloat() / sentDelta else 0f
+                val bitrateRatio = if (targetBitrate() > 0) lastActualBitrate.toFloat() / targetBitrate() else 1f
+                connectionQuality.value = when {
+                    congestion || dropRate > 0.3f || cachePct > 0.8f || bitrateRatio < 0.3f -> ConnectionQuality.Poor
+                    dropRate > 0.05f || cachePct > 0.4f || bitrateRatio < 0.7f -> ConnectionQuality.Fair
+                    else -> ConnectionQuality.Good
+                }
+            }
+        }
+    }
+
+    private fun stopQualityPolling() {
+        qualityPollJob?.cancel()
+        qualityPollJob = null
+        connectionQuality.value = ConnectionQuality.Good
+    }
+
+    // ── Stream control ─────────────────────────────────────────────────
+
     private fun toggleStream(ip: String, portString: String, name: String) {
         if (srtCamera2 == null) return
         val currentState = streamState.value
-
-        // Ignore taps while a transition is in progress
         if (currentState is StreamState.Connecting || currentState is StreamState.Stopping) {
             logMessage("Ignoring tap: transition in progress")
             return
         }
-
-        // ── STOP (from Streaming or Reconnecting) ────────────────────────
         if (currentState is StreamState.Streaming || currentState is StreamState.Reconnecting) {
             logMessage("Stopping stream...")
+            stopQualityPolling()
             cancelReconnect()
             streamState.value = StreamState.Stopping
-            encodersReady = false
             lifecycleScope.launch(Dispatchers.IO) {
                 srtCamera2?.stopStream()
-                // Camera2 is main-thread-only: stopPreview must not run on IO
                 withContext(Dispatchers.Main) {
-                    srtCamera2?.stopPreview()
                     streamState.value = StreamState.Idle
-                    startCameraPreview()
+                    encodersReady = false
                 }
             }
             return
         }
-
-        // ── START (from Idle) ────────────────────────────────────────────
         if (!encodersReady) {
             logMessage("Encoders not ready, retrying...")
             encodersReady = prepareEncoders()
@@ -416,19 +433,14 @@ class MainActivity : ComponentActivity(), ConnectChecker {
                 return
             }
         }
-
-        val port = portString.toIntOrNull() ?: 9000
+        val portInt = portString.toIntOrNull() ?: 9000
         val sanitizedName = name.trim().replace(" ", "_").filter { it.isLetterOrDigit() || it == '_' }
         if (ip.isBlank() || sanitizedName.isBlank()) {
             logMessage("Error: Missing IP or Display Name"); return
         }
 
-        // RootEncoder (pedroSG94) expects the SRT stream ID as a URL path segment,
-        // NOT as a `streamid=` query parameter. The correct format is:
-        //   srt://ip:port/publish:name?latency=...
-        // Do NOT change this to query-parameter style — it will produce
-        // "endpoint malformed" errors at connection time.
-        val srtUrl = "srt://${ip}:${port}/publish:${sanitizedName}?latency=120000"
+        val latencyParam = if (latencyAuto) "auto" else "${latencyMs * 1000}"
+        val srtUrl = "srt://${ip}:${portInt}/publish:${sanitizedName}?latency=${latencyParam}"
         lastSrtUrl = srtUrl
         logMessage("Connecting to $srtUrl")
         streamState.value = StreamState.Connecting
@@ -472,601 +484,12 @@ class MainActivity : ComponentActivity(), ConnectChecker {
     private fun toggleOrientation() {
         if (isPortraitState.value) {
             isPortraitState.value = false
-            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
             logMessage("Orientation: landscape")
         } else {
             isPortraitState.value = true
-            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+            requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
             logMessage("Orientation: portrait")
-        }
-    }
-
-    @Composable
-    fun RecordButton(
-        isStreaming: Boolean,
-        onClick: () -> Unit,
-        modifier: Modifier = Modifier
-    ) {
-        val transition = updateTransition(targetState = isStreaming, label = "recordButton")
-
-        // Animate outer ring color (White to Red)
-        val outlineColor by transition.animateColor(
-            transitionSpec = {
-                spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMedium)
-            },
-            label = "outlineColor"
-        ) { streaming ->
-            if (streaming) Color(0xFFE24B4A) else Color.White
-        }
-
-        // Animate center button size (54.dp to 32.dp)
-        val centerSize by transition.animateDp(
-            transitionSpec = {
-                spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow)
-            },
-            label = "centerSize"
-        ) { streaming ->
-            if (streaming) 32.dp else 54.dp
-        }
-
-        // Animate center button corner radius (27.dp to 8.dp)
-        val centerCornerRadius by transition.animateDp(
-            transitionSpec = {
-                spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow)
-            },
-            label = "centerCornerRadius"
-        ) { streaming ->
-            if (streaming) 8.dp else 27.dp
-        }
-
-        Box(
-            modifier = modifier
-                .size(80.dp)
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = onClick
-                ),
-            contentAlignment = Alignment.Center
-        ) {
-            // Outer ring border
-            Box(
-                modifier = Modifier
-                    .size(76.dp)
-                    .border(4.dp, outlineColor, CircleShape)
-            )
-
-            // Inner center button
-            Box(
-                modifier = Modifier
-                    .size(centerSize)
-                    .background(
-                        color = Color(0xFFE24B4A),
-                        shape = RoundedCornerShape(centerCornerRadius)
-                    )
-            )
-        }
-    }
-
-    @Composable
-    fun MicIcon(isAudioEnabled: Boolean, modifier: Modifier = Modifier) {
-        Canvas(modifier = modifier.size(24.dp)) {
-            val w = size.width
-            val h = size.height
-            val activeColor = Color.White
-            val inactiveColor = Color(0xFFF38BA8)
-            val color = if (isAudioEnabled) activeColor else inactiveColor
-
-            // Draw microphone body (rounded rect in the middle)
-            val bodyWidth = w * 0.35f
-            val bodyHeight = h * 0.55f
-            val bodyLeft = (w - bodyWidth) / 2
-            val bodyTop = h * 0.12f
-            drawRoundRect(
-                color = color,
-                topLeft = Offset(bodyLeft, bodyTop),
-                size = Size(bodyWidth, bodyHeight),
-                cornerRadius = CornerRadius(bodyWidth / 2, bodyWidth / 2),
-                style = Stroke(width = 2.dp.toPx())
-            )
-            // Draw solid fill or inner rect for the body
-            if (isAudioEnabled) {
-                drawRoundRect(
-                    color = color.copy(alpha = 0.4f),
-                    topLeft = Offset(bodyLeft + 3.dp.toPx(), bodyTop + 3.dp.toPx()),
-                    size = Size(bodyWidth - 6.dp.toPx(), bodyHeight - 6.dp.toPx()),
-                    cornerRadius = CornerRadius((bodyWidth - 6.dp.toPx()) / 2, (bodyWidth - 6.dp.toPx()) / 2)
-                )
-            }
-
-            // Draw cradle (semi-circle around bottom)
-            val cradleRadius = w * 0.28f
-            drawArc(
-                color = color,
-                startAngle = 0f,
-                sweepAngle = 180f,
-                useCenter = false,
-                topLeft = Offset(w / 2 - cradleRadius, h * 0.35f),
-                size = Size(cradleRadius * 2, cradleRadius * 2),
-                style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round)
-            )
-
-            // Draw stand (vertical line down from cradle)
-            drawLine(
-                color = color,
-                start = Offset(w / 2, h * 0.35f + cradleRadius * 2),
-                end = Offset(w / 2, h * 0.88f),
-                strokeWidth = 2.dp.toPx(),
-                cap = StrokeCap.Round
-            )
-
-            // Draw base (horizontal line at the bottom)
-            val baseWidth = w * 0.3f
-            drawLine(
-                color = color,
-                start = Offset(w / 2 - baseWidth / 2, h * 0.88f),
-                end = Offset(w / 2 + baseWidth / 2, h * 0.88f),
-                strokeWidth = 2.dp.toPx(),
-                cap = StrokeCap.Round
-            )
-
-            // Draw slash if muted
-            if (!isAudioEnabled) {
-                drawLine(
-                    color = inactiveColor,
-                    start = Offset(w * 0.2f, h * 0.2f),
-                    end = Offset(w * 0.8f, h * 0.8f),
-                    strokeWidth = 2.dp.toPx(),
-                    cap = StrokeCap.Round
-                )
-            }
-        }
-    }
-
-    @Composable
-    fun MainScreen() {
-        var ip by rememberSaveable { mutableStateOf("192.168.1.100") }
-        var port by rememberSaveable { mutableStateOf("9000") }
-        var name by rememberSaveable { mutableStateOf("Default") }
-        var selectedProfile by rememberSaveable { mutableStateOf(activeProfile.value) }
-
-        // Keep the Activity-level activeProfile (read by prepareEncoders) in sync with
-        // the Compose state. LaunchedEffect re-runs on every selectedProfile change,
-        // including after Activity recreation when rememberSaveable restores the value.
-        LaunchedEffect(selectedProfile) {
-            activeProfile.value = selectedProfile
-        }
-
-        var showConfigDialog by remember { mutableStateOf(false) }
-        var showLogsDialog by remember { mutableStateOf(false) }
-
-        val currentStreamState by streamState
-        // Derived helpers used throughout the UI
-        val isStreaming = currentStreamState is StreamState.Streaming
-        val isActive    = currentStreamState !is StreamState.Idle  // true while connecting / streaming / reconnecting / stopping
-        val isAudioEnabled by isAudioEnabledState
-        val allowVertical by allowVerticalState
-
-        val configuration = LocalConfiguration.current
-        val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .pointerInput(allowVertical) {
-                    // Only capture double-taps when the user has enabled vertical mode.
-                    // The key `allowVertical` restarts this block when the toggle changes.
-                    if (allowVertical) {
-                        detectTapGestures(onDoubleTap = { toggleOrientation() })
-                    }
-                },
-            contentAlignment = Alignment.Center
-        ) {
-            // Fullscreen OpenGL preview
-            AndroidView(
-                factory = { openGlView ?: error("OpenGlView not initialized") },
-                modifier = Modifier.fillMaxSize()
-            )
-
-            // HUD Overlays
-            // 1. Live Indicator (Top Start / Left)
-            Row(
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(16.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(Color.Black.copy(alpha = 0.6f))
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                val dotColor = when (currentStreamState) {
-                    is StreamState.Streaming    -> Color(0xFFE24B4A)
-                    is StreamState.Reconnecting -> Color(0xFFE5C890) // amber
-                    is StreamState.Connecting   -> Color(0xFFCBA6F7) // purple
-                    else                        -> Color(0xFFBAC2DE)
-                }
-                val statusText = when (val s = currentStreamState) {
-                    is StreamState.Streaming    -> "LIVE"
-                    is StreamState.Reconnecting -> "RETRY ${s.attempt}/${s.maxAttempts}"
-                    is StreamState.Connecting   -> "CONNECTING"
-                    is StreamState.Stopping     -> "STOPPING"
-                    else                        -> "STANDBY"
-                }
-                Box(
-                    modifier = Modifier
-                        .size(8.dp)
-                        .clip(CircleShape)
-                        .background(dotColor)
-                )
-                Text(
-                    text = statusText,
-                    color = Color.White,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace
-                )
-            }
-
-            // 2. Stream URL info (Top End / Right)
-            if (isStreaming) {
-                Text(
-                    text = "$ip:$port/$name",
-                    color = Color.White.copy(alpha = 0.8f),
-                    fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace,
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(16.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(Color.Black.copy(alpha = 0.6f))
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                )
-            }
-
-            // 3. Control Panel (Bottom Row for Portrait, Right Column for Landscape)
-            if (isLandscape) {
-                Column(
-                    modifier = Modifier
-                        .align(Alignment.CenterEnd)
-                        .fillMaxHeight()
-                        .width(88.dp)
-                        .background(Color.Black.copy(alpha = 0.5f))
-                        .padding(vertical = 24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.SpaceEvenly
-                ) {
-                    IconButton(
-                        onClick = { showConfigDialog = true },
-                        modifier = Modifier.size(48.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Settings,
-                            contentDescription = "Settings",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
-
-                    IconButton(
-                        onClick = { toggleAudio() },
-                        modifier = Modifier.size(48.dp)
-                    ) {
-                        MicIcon(isAudioEnabled = isAudioEnabled)
-                    }
-
-                    RecordButton(
-                        isStreaming = isStreaming,
-                        onClick = { toggleStream(ip, port, name) }
-                    )
-
-                    IconButton(
-                        onClick = { switchCamera() },
-                        modifier = Modifier.size(48.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Refresh,
-                            contentDescription = "Switch Camera",
-                            tint = Color.White
-                        )
-                    }
-
-                    IconButton(
-                        onClick = { showLogsDialog = true },
-                        modifier = Modifier.size(48.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.List,
-                            contentDescription = "Connection Logs",
-                            tint = MaterialTheme.colorScheme.secondary
-                        )
-                    }
-                }
-            } else {
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth()
-                        .height(100.dp)
-                        .background(Color.Black.copy(alpha = 0.5f))
-                        .padding(horizontal = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceEvenly
-                ) {
-                    IconButton(
-                        onClick = { showConfigDialog = true },
-                        modifier = Modifier.size(48.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Settings,
-                            contentDescription = "Settings",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
-
-                    IconButton(
-                        onClick = { toggleAudio() },
-                        modifier = Modifier.size(48.dp)
-                    ) {
-                        MicIcon(isAudioEnabled = isAudioEnabled)
-                    }
-
-                    RecordButton(
-                        isStreaming = isStreaming,
-                        onClick = { toggleStream(ip, port, name) }
-                    )
-
-                    IconButton(
-                        onClick = { switchCamera() },
-                        modifier = Modifier.size(48.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Refresh,
-                            contentDescription = "Switch Camera",
-                            tint = Color.White
-                        )
-                    }
-
-                    IconButton(
-                        onClick = { showLogsDialog = true },
-                        modifier = Modifier.size(48.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.List,
-                            contentDescription = "Connection Logs",
-                            tint = MaterialTheme.colorScheme.secondary
-                        )
-                    }
-                }
-            }
-        }
-
-        // Configuration Dialog Popup
-        if (showConfigDialog) {
-            AlertDialog(
-                onDismissRequest = { showConfigDialog = false },
-                properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
-                modifier = Modifier.fillMaxWidth(0.9f),
-                title = {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Connection Settings", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-                        Button(
-                            onClick = { showConfigDialog = false },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.primary,
-                                contentColor = Color(0xFF11111B)
-                            ),
-                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 0.dp),
-                            modifier = Modifier.height(32.dp)
-                        ) {
-                            Text("Done", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                        }
-                    }
-                },
-                text = {
-                    Column(
-                        modifier = Modifier.verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        OutlinedTextField(
-                            value = ip,
-                            onValueChange = { if (!isActive) ip = it },
-                            label = { Text("Broadcaster IP") },
-                            enabled = !isActive,
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = MaterialTheme.colorScheme.primary,
-                                unfocusedBorderColor = Color(0xFF45475A)
-                            )
-                        )
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            OutlinedTextField(
-                                value = port,
-                                onValueChange = { if (!isActive) port = it },
-                                label = { Text("SRT Port") },
-                                enabled = !isActive,
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                modifier = Modifier.weight(1f),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = MaterialTheme.colorScheme.primary,
-                                    unfocusedBorderColor = Color(0xFF45475A)
-                                )
-                            )
-                            OutlinedTextField(
-                                value = name,
-                                onValueChange = { if (!isActive) name = it },
-                                label = { Text("Display Name") },
-                                enabled = !isActive,
-                                modifier = Modifier.weight(2f),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = MaterialTheme.colorScheme.primary,
-                                    unfocusedBorderColor = Color(0xFF45475A)
-                                )
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text("Video Quality Profile (Unstable Networks)", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            val profiles = listOf("High", "Medium", "Low")
-                            profiles.forEach { profile ->
-                                val isSelected = selectedProfile == profile
-                                val containerColor = if (isSelected) MaterialTheme.colorScheme.primary else Color(0xFF313244)
-                                val contentColor = if (isSelected) Color(0xFF11111B) else Color(0xFFCDD6F4)
-                                Button(
-                                    onClick = {
-                                        if (!isActive) {
-                                            selectedProfile = profile
-                                            // activeProfile is synced via LaunchedEffect(selectedProfile)
-                                            encodersReady = false
-                                            val (w, h, br) = dimensionsForProfile(profile)
-                                            logMessage("Selected profile: $profile (${w}x${h}, ${br / 1024} Kbps)")
-                                        }
-                                    },
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = containerColor,
-                                        contentColor = contentColor
-                                    ),
-                                    modifier = Modifier.weight(1f),
-                                    contentPadding = PaddingValues(vertical = 4.dp),
-                                    shape = RoundedCornerShape(8.dp)
-                                ) {
-                                    Text(profile, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                                }
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(4.dp))
-                        HorizontalDivider(color = Color(0xFF45475A), thickness = 1.dp)
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            "Display Orientation",
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 14.sp
-                        )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column {
-                                Text(
-                                    "Allow Vertical Mode",
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                    fontSize = 13.sp
-                                )
-                                Text(
-                                    "Double-tap preview to rotate",
-                                    color = Color(0xFF7F849C),
-                                    fontSize = 11.sp
-                                )
-                            }
-                            Switch(
-                                checked = allowVertical,
-                                onCheckedChange = { enabled ->
-                                    allowVerticalState.value = enabled
-                                    if (!enabled) {
-                                        // Snap back to landscape when vertical is disabled
-                                        isPortraitState.value = false
-                                        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                                    }
-                                },
-                                colors = SwitchDefaults.colors(
-                                    checkedThumbColor = MaterialTheme.colorScheme.primary,
-                                    checkedTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
-                                )
-                            )
-                        }
-                    }
-                },
-                confirmButton = {},
-                containerColor = MaterialTheme.colorScheme.surface,
-                shape = RoundedCornerShape(16.dp)
-            )
-        }
-
-        // Diagnostics Log Dialog Popup
-        if (showLogsDialog) {
-            AlertDialog(
-                onDismissRequest = { showLogsDialog = false },
-                title = { Text("Diagnostics & Logs", color = MaterialTheme.colorScheme.secondary, fontWeight = FontWeight.Bold) },
-                text = {
-                    Column(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(280.dp)
-                                .background(Color(0xFF181825), RoundedCornerShape(8.dp))
-                                .border(1.dp, Color(0xFF313244), RoundedCornerShape(8.dp))
-                                .padding(8.dp)
-                        ) {
-                            val scrollState = rememberScrollState()
-                            LaunchedEffect(logs.size) {
-                                if (logs.isNotEmpty()) scrollState.scrollTo(scrollState.maxValue)
-                            }
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .verticalScroll(scrollState),
-                                verticalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                if (logs.isEmpty()) {
-                                    Text(
-                                        text = "Ready. Configure connection parameters and start streaming.",
-                                        color = Color(0xFF7F849C),
-                                        fontFamily = FontFamily.Monospace,
-                                        fontSize = 12.sp
-                                    )
-                                } else {
-                                    logs.forEach { log ->
-                                        Text(
-                                            text = log,
-                                            color = Color(0xFFA6E3A1),
-                                            fontFamily = FontFamily.Monospace,
-                                            fontSize = 12.sp
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                },
-                confirmButton = {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        TextButton(
-                            onClick = { logs.clear() },
-                            colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFFF38BA8))
-                        ) {
-                            Text("Clear Logs")
-                        }
-                        Button(
-                            onClick = { showLogsDialog = false },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.secondary,
-                                contentColor = Color(0xFF11111B)
-                            )
-                        ) {
-                            Text("Close", fontWeight = FontWeight.Bold)
-                        }
-                    }
-                },
-                containerColor = MaterialTheme.colorScheme.surface,
-                shape = RoundedCornerShape(16.dp)
-            )
         }
     }
 }
