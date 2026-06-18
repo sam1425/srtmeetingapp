@@ -1,64 +1,77 @@
-# OBS Plugin Template
+# SRT Meeting App
 
-## Introduction
+Android streaming client + OBS Studio plugin for real-time participant video via SRT (Secure Reliable Transport).
 
-The plugin template is meant to be used as a starting point for OBS Studio plugin development. It includes:
+## Overview
 
-* Boilerplate plugin source code
-* A CMake project file
-* GitHub Actions workflows and repository actions
+- **Android app** streams camera + mic to an SRT broker using RTMP-style publish paths.
+- **OBS plugin** runs an SRT broker on a UDP port, accepts incoming streams, relays them to loopback ports, and dynamically creates/removes `ffmpeg_source` (Media Source) OBS sources for each connected participant.
+- **Latency**: Client sends `?latency=<μs>` (manual mode) or `?latency=auto` (OBS decides). The broker parses the StreamID query params and configures the loopback latency per-participant.
 
-## Supported Build Environments
+## Features
 
-| Platform  | Tool   |
-|-----------|--------|
-| Windows   | Visual Studio 17 2022 |
-| macOS     | XCode 16.0 |
-| Windows, macOS  | CMake 3.30.5 |
-| Ubuntu 24.04 | CMake 3.28.3 |
-| Ubuntu 24.04 | `ninja-build` |
-| Ubuntu 24.04 | `pkg-config`
-| Ubuntu 24.04 | `build-essential` |
+- Dynamic/static participant source management
+- Per-participant relay threads with automatic cleanup
+- Latency slider (20–1000ms) + auto toggle on the client
+- OBS dock UI with default latency spinner for auto clients
+- Connection quality indicator (green/yellow/red based on SRT RTT)
+- Port allocation from a pool (10000–10100)
+- Automatic reconnection handling
 
-## Quick Start
+## Project Structure
 
-An absolute bare-bones [Quick Start Guide](https://github.com/obsproject/obs-plugintemplate/wiki/Quick-Start-Guide) is available in the wiki.
+```
+├── android/              # Android app (Kotlin, Jetpack Compose, RootEncoder)
+├── src/
+│   ├── plugin-main.cpp   # OBS plugin: SRT broker, dock UI, source management
+│   └── client/           # Standalone Qt desktop client (minimal)
+├── cmake/                # CMake build system config per platform
+├── .github/              # CI/CD workflows + build/packaging scripts
+└── cmake/windows/installer.iss.in  # Inno Setup installer template
+```
+
+## Build
+
+### OBS Plugin
+
+```bash
+cmake --preset windows-x64   # Windows (VS 17 2022)
+cmake --preset macos-universal   # macOS (Xcode, universal binary)
+cmake --preset ubuntu-x86_64     # Linux (Ninja)
+cmake --build --preset <preset>
+```
+
+### Android Client
+
+Open `android/` in Android Studio, or:
+
+```bash
+cd android && ./gradlew assembleRelease
+```
+
+## Installation
+
+### Windows
+The CI produces a signed Inno Setup installer (`.exe`) that installs per-user to `%APPDATA%\obs-studio\plugins\srt-meeting-app\bin\64bit\`. A `.zip` is also provided for manual install.
+
+### Linux
+Copy `build_x86_64/rundir/RelWithDebInfo/srt-meeting-app/` to `~/.config/obs-studio/plugins/` or use the `.deb` package.
+
+### macOS
+Use the `.pkg` installer from the release.
 
 ## Documentation
 
-All documentation can be found in the [Plugin Template Wiki](https://github.com/obsproject/obs-plugintemplate/wiki).
+- [OBS SRT Meeting Specification](docs/obs_srt_meeting_specification.md) — system design and SRT broker architecture
+- [Android Client Specification](docs/android_client_specification.md) — app design and streaming setup
+- [Design Updates](docs/design_updates.md) — UI/UX changes
 
-### Project Specifications
-* [OBS SRT Meeting Specification](docs/obs_srt_meeting_specification.md) - Main system design, connection scheme, and OBS integration.
-* [Android Client Specification](docs/android_client_specification.md) - Android App setup, technologies, and dark-theme style design system.
-* [UI Design Updates](docs/design_updates.md) - Detailed design of the record button animations and responsive screen layouts.
+## CI/CD
 
-Suggested reading to get up and running:
+GitHub Actions build for all three platforms on push/PR/tag. Tagged releases (`1.2.3`, `1.2.3-beta1`) create draft releases with signed installers (Windows `.exe`, macOS `.pkg`, Ubuntu `.deb`).
 
-* [Getting started](https://github.com/obsproject/obs-plugintemplate/wiki/Getting-Started)
-* [Build system requirements](https://github.com/obsproject/obs-plugintemplate/wiki/Build-System-Requirements)
-* [Build system options](https://github.com/obsproject/obs-plugintemplate/wiki/CMake-Build-System-Options)
+Windows signing requires `WINDOWS_SIGNING_CERT` (base64 PFX) and `WINDOWS_SIGNING_PASSWORD` secrets.
 
-## GitHub Actions & CI
+## License
 
-Default GitHub Actions workflows are available for the following repository actions:
-
-* `push`: Run for commits or tags pushed to `master` or `main` branches.
-* `pr-pull`: Run when a Pull Request has been pushed or synchronized.
-* `dispatch`: Run when triggered by the workflow dispatch in GitHub's user interface.
-* `build-project`: Builds the actual project and is triggered by other workflows.
-* `check-format`: Checks CMake and plugin source code formatting and is triggered by other workflows.
-
-The workflows make use of GitHub repository actions (contained in `.github/actions`) and build scripts (contained in `.github/scripts`) which are not needed for local development, but might need to be adjusted if additional/different steps are required to build the plugin.
-
-### Retrieving build artifacts
-
-Successful builds on GitHub Actions will produce build artifacts that can be downloaded for testing. These artifacts are commonly simple archives and will not contain package installers or installation programs.
-
-### Building a Release
-
-To create a release, an appropriately named tag needs to be pushed to the `main`/`master` branch using semantic versioning (e.g., `12.3.4`, `23.4.5-beta2`). A draft release will be created on the associated repository with generated installer packages or installation programs attached as release artifacts.
-
-## Signing and Notarizing on macOS
-
-Basic concepts of codesigning and notarization on macOS are explained in the correspodning [Wiki article](https://github.com/obsproject/obs-plugintemplate/wiki/Codesigning-On-macOS) which has a specific section for the [GitHub Actions setup](https://github.com/obsproject/obs-plugintemplate/wiki/Codesigning-On-macOS#setting-up-code-signing-for-github-actions).
+GPLv2 — see [LICENSE](LICENSE).
