@@ -44,17 +44,10 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/plugin-main.cpp)
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
 
 if(ENABLE_QT)
-  add_executable(obs-srt-meeting-client
-    src/client/main.cpp
-    src/client/mainwindow.cpp
-    src/client/mainwindow.h
-  )
+  add_executable(obs-srt-meeting-client src/client/main.cpp src/client/mainwindow.cpp src/client/mainwindow.h)
   target_link_libraries(obs-srt-meeting-client PRIVATE Qt6::Core Qt6::Widgets)
-  set_target_properties(obs-srt-meeting-client PROPERTIES
-    AUTOMOC ON
-    AUTOUIC ON
-    AUTORCC ON
+  set_target_properties(
+    obs-srt-meeting-client
+    PROPERTIES AUTOMOC ON AUTOUIC ON AUTORCC ON
   )
 endif()
-
-
