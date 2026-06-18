@@ -38,14 +38,7 @@ if (( ! (${skips[(Ie)all]} + ${skips[(Ie)deps]}) )) {
   sudo add-apt-repository --yes ppa:obsproject/obs-studio
   sudo apt update
 
-  sudo apt-get install ${apt_args} \
-    build-essential \
-    libgles2-mesa-dev \
-    libsimde-dev \
-    obs-studio
-
   local -a _qt_packages=()
-
   if (( QT_VERSION == 5 )) {
     _qt_packages+=(
       qtbase5-dev${suffix}
@@ -61,6 +54,12 @@ if (( ! (${skips[(Ie)all]} + ${skips[(Ie)deps]}) )) {
     )
   }
 
-  sudo apt-get install ${apt_args} ${_qt_packages}
+  sudo apt-get install ${apt_args} \
+    build-essential \
+    libgles2-mesa-dev \
+    libsimde-dev \
+    libsrt-openssl-dev \
+    obs-studio \
+    ${_qt_packages}
   log_group
 }
