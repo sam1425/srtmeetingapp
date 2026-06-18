@@ -34,17 +34,20 @@
 #include <QRadioButton>
 #include <QButtonGroup>
 #include <QListWidget>
+#include <QSpinBox>
+#include <QHBoxLayout>
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
 
 // Forward declaration of OBS API helper functions
-void create_obs_srt_source(const std::string& name, int port);
+void create_obs_srt_source(const std::string& name, int port, int latency_ms);
 void remove_obs_srt_source(const std::string& name);
 void update_participants_list_ui();
 
 // Static UI Globals
 static std::atomic<bool> s_automatic_mode{true};
+static std::atomic<int> s_default_latency_ms{120};
 static QListWidget *s_participants_list{nullptr};
 static QDockWidget *s_dock_widget{nullptr};
 
@@ -211,13 +214,26 @@ private:
             // Parse StreamID. Expected format: publish:<username> (MediaMTX way)
             const std::string prefix = "publish:";
             if (stream_id_str.rfind(prefix, 0) == 0) {
-                std::string username = stream_id_str.substr(prefix.length());
+                std::string after_prefix = stream_id_str.substr(prefix.length());
                 
-                // Strip query parameters if present (e.g., ?latency=120000)
-                size_t query_pos = username.find_first_of("?;");
+                // Extract latency from query params before stripping
+                int client_latency_ms = 0;
+                size_t query_pos = after_prefix.find_first_of("?;");
                 if (query_pos != std::string::npos) {
-                    username = username.substr(0, query_pos);
+                    std::string query = after_prefix.substr(query_pos + 1);
+                    size_t lat_pos = query.find("latency=");
+                    if (lat_pos != std::string::npos) {
+                        std::string val = query.substr(lat_pos + 8);
+                        size_t end = val.find_first_of("&;");
+                        if (end != std::string::npos) val = val.substr(0, end);
+                        if (val != "auto") {
+                            try { client_latency_ms = std::stoi(val) / 1000; } catch (...) {}
+                        }
+                    }
                 }
+
+                // Strip query parameters
+                std::string username = after_prefix.substr(0, query_pos);
 
                 // Sanitize username (alphanumeric and underscores only)
                 for (char& c : username) {
@@ -248,7 +264,7 @@ private:
                         }
                     }
                     handler_futures.push_back(std::async(std::launch::async,
-                        &SRTBroker::handle_new_publisher, this, username, client_sock));
+                        &SRTBroker::handle_new_publisher, this, username, client_sock, client_latency_ms));
                 }
             } else {
                 obs_log(LOG_WARNING, "Invalid StreamID. Expected 'publish:<name>', got '%s'", stream_id);
@@ -262,7 +278,7 @@ private:
       }
     }
 
-    void handle_new_publisher(std::string username, SRTSOCKET client_sock) {
+    void handle_new_publisher(std::string username, SRTSOCKET client_sock, int latency_ms) {
       try {
         std::shared_ptr<Participant> old_p;
         {
@@ -347,7 +363,8 @@ private:
         update_participants_list_ui();
 
         // Tell OBS to create the source pointing to our loopback listener
-        create_obs_srt_source(username, loopback_port);
+        int final_latency_ms = latency_ms > 0 ? latency_ms : s_default_latency_ms.load();
+        create_obs_srt_source(username, loopback_port, final_latency_ms);
 
         // Accept connection from OBS Media Source
         sockaddr_in obs_addr;
@@ -606,7 +623,44 @@ static void setup_plugin_dock(int broker_port) {
     // Spacer
     layout->addSpacing(8);
 
-    // Section 2: Active Participants
+    // Section 2: Default Latency (used when client sends auto)
+    QLabel *latency_label = new QLabel("<b>Default Latency (auto clients)</b>", content);
+    latency_label->setStyleSheet("font-size: 13px; color: #bac2de;");
+    layout->addWidget(latency_label);
+
+    QWidget *latency_row = new QWidget(content);
+    QHBoxLayout *latency_layout = new QHBoxLayout(latency_row);
+    latency_layout->setContentsMargins(0, 0, 0, 0);
+
+    QSpinBox *latency_spin = new QSpinBox(latency_row);
+    latency_spin->setRange(20, 1000);
+    latency_spin->setValue(s_default_latency_ms.load());
+    latency_spin->setSuffix(" ms");
+    latency_spin->setToolTip("Latency used when client sends 'auto' (ignored when client specifies a value).");
+    latency_spin->setStyleSheet(
+        "background-color: rgb(30, 30, 46);"
+        "color: rgb(166, 227, 161);"
+        "border: 1px solid rgb(49, 50, 68);"
+        "border-radius: 4px;"
+        "padding: 4px;"
+    );
+    latency_layout->addWidget(latency_spin);
+
+    QLabel *latency_hint = new QLabel("Lower = faster, higher = more stable", latency_row);
+    latency_hint->setStyleSheet("color: rgb(147, 153, 178); font-size: 10px;");
+    latency_layout->addWidget(latency_hint);
+
+    layout->addWidget(latency_row);
+
+    QObject::connect(latency_spin, QOverload<int>::of(&QSpinBox::valueChanged), [](int val) {
+        s_default_latency_ms.store(val);
+        obs_log(LOG_INFO, "Default latency changed to %d ms", val);
+    });
+
+    // Spacer
+    layout->addSpacing(8);
+
+    // Section 3: Active Participants
     QLabel *list_label = new QLabel("<b>Active Participants</b>", content);
     list_label->setStyleSheet("font-size: 13px; color: #bac2de;");
     layout->addWidget(list_label);
@@ -683,6 +737,7 @@ void obs_module_unload(void)
 struct TaskData {
     std::string name;
     int port;
+    int latency_ms;
 };
 
 void create_obs_srt_source_task(void *param) {
@@ -693,7 +748,7 @@ void create_obs_srt_source_task(void *param) {
     
     // Construct the loopback SRT URL
     // Low latency is configured via latency parameter (value in microseconds)
-    std::string srt_url = "srt://127.0.0.1:" + std::to_string(data->port) + "?mode=caller&latency=120000";
+    std::string srt_url = "srt://127.0.0.1:" + std::to_string(data->port) + "?mode=caller&latency=" + std::to_string(data->latency_ms * 1000);
     obs_data_set_string(settings, "input", srt_url.c_str());
     obs_data_set_bool(settings, "is_local_file", false);
     obs_data_set_string(settings, "input_format", "mpegts");
@@ -755,8 +810,8 @@ void remove_obs_srt_source_task(void *param) {
     delete name;
 }
 
-void create_obs_srt_source(const std::string& name, int port) {
-    auto* data = new TaskData{name, port};
+void create_obs_srt_source(const std::string& name, int port, int latency_ms) {
+    auto* data = new TaskData{name, port, latency_ms};
     obs_queue_task(OBS_TASK_UI, create_obs_srt_source_task, data, false);
 }
 

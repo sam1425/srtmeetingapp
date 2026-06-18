@@ -47,7 +47,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
     val connectionQuality = mutableStateOf(ConnectionQuality.Good)
 
     // ── Connection / form state (survives recomposition) ────────────────
-    private var ip by mutableStateOf("192.168.1.100")
+    private var ip by mutableStateOf("iduai.duckdns.org")
     private var port by mutableStateOf("9000")
     private var name by mutableStateOf("Default")
     private var selectedProfile by mutableStateOf("High")
@@ -439,7 +439,8 @@ class MainActivity : ComponentActivity(), ConnectChecker {
             logMessage("Error: Missing IP or Display Name"); return
         }
 
-        val srtUrl = "srt://${ip}:${portInt}/publish:${sanitizedName}?latency=${latencyMs * 1000}"
+        val latencyParam = if (latencyAuto) "auto" else "${latencyMs * 1000}"
+        val srtUrl = "srt://${ip}:${portInt}/publish:${sanitizedName}?latency=${latencyParam}"
         lastSrtUrl = srtUrl
         logMessage("Connecting to $srtUrl")
         streamState.value = StreamState.Connecting
