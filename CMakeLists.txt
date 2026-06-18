@@ -6,6 +6,7 @@ project(${_name} VERSION ${_version})
 
 option(ENABLE_FRONTEND_API "Use obs-frontend-api for UI functionality" ON)
 option(ENABLE_QT "Use Qt functionality" ON)
+option(ENABLE_FORMAT_CHECK "Fail build if source formatting is incorrect" OFF)
 
 include(compilerconfig)
 include(defaults)
@@ -66,4 +67,23 @@ if(ENABLE_QT)
     obs-srt-meeting-client
     PROPERTIES AUTOMOC ON AUTOUIC ON AUTORCC ON
   )
+endif()
+
+if(ENABLE_FORMAT_CHECK)
+  set(FORMAT_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/plugin-main.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/client/main.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/client/mainwindow.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/client/mainwindow.h
+  )
+  add_custom_target(check-format
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/build-aux/run-clang-format
+      --check --fail-on-change ${FORMAT_SOURCES}
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    COMMENT "Checking C++ formatting with clang-format..."
+  )
+  add_dependencies(${CMAKE_PROJECT_NAME} check-format)
+  if(TARGET obs-srt-meeting-client)
+    add_dependencies(obs-srt-meeting-client check-format)
+  endif()
 endif()
