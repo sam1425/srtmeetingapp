@@ -7,7 +7,7 @@
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
 
     <application
-        android:label="srtmettingapp"
+        android:label="SRT Meeting"
         android:theme="@style/Theme.srtmeetingapp"
         android:allowBackup="false">
         <activity

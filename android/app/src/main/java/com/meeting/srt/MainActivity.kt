@@ -33,7 +33,6 @@ import com.pedro.library.srt.SrtCamera2
 import com.pedro.library.view.OpenGlView
 import java.text.SimpleDateFormat
 import java.util.*
-
 import androidx.compose.animation.animateColor
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.clickable
@@ -54,21 +53,38 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import android.content.pm.ActivityInfo
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 
 class MainActivity : ComponentActivity(), ConnectChecker {
 
     private var srtCamera2: SrtCamera2? = null
     private var openGlView: OpenGlView? = null
     private var isSurfaceReady = false
-    private var encodersReady = false
+    @Volatile private var encodersReady = false
 
-    private var videoWidth = 1280
-    private var videoHeight = 720
-    private var videoBitrate = 2000 * 1024
+    // Single source of truth for video quality profile — kept in sync with
+    // the Composable's rememberSaveable state via LaunchedEffect, so it
+    // survives both runtime changes and Activity recreation correctly.
+    private val activeProfile = mutableStateOf("High")
+
+    private fun dimensionsForProfile(profile: String): Triple<Int, Int, Int> = when (profile) {
+        "Medium" -> Triple(854, 480, 1000 * 1024)
+        "Low"    -> Triple(640, 360, 500 * 1024)
+        else     -> Triple(1280, 720, 2000 * 1024) // "High" default
+    }
 
     private val isStreamingState = mutableStateOf(false)
     private val isAudioEnabledState = mutableStateOf(true)
     private val logs = mutableStateListOf<String>()
+    // Orientation control — landscape is the default; portrait is opt-in per session
+    private val allowVerticalState = mutableStateOf(false)
+    private val isPortraitState = mutableStateOf(false)
 
     private val requestPermissionsLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -86,6 +102,8 @@ class MainActivity : ComponentActivity(), ConnectChecker {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Default to landscape; portrait must be explicitly unlocked in Settings
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
 
         val view = OpenGlView(this)
         openGlView = view
@@ -166,9 +184,10 @@ class MainActivity : ComponentActivity(), ConnectChecker {
     }
 
     private fun prepareEncoders(): Boolean {
-        if (srtCamera2?.prepareVideo(videoWidth, videoHeight, 30, videoBitrate, 0) == true &&
+        val (w, h, br) = dimensionsForProfile(activeProfile.value)
+        if (srtCamera2?.prepareVideo(w, h, 30, br, 0) == true &&
             srtCamera2?.prepareAudio(128 * 1024, 44100, true, true, true) == true) {
-                logMessage("Encoders ready: ${videoWidth}x${videoHeight} @ ${videoBitrate / 1024} Kbps.")
+                logMessage("Encoders ready: ${w}x${h} @ ${br / 1024} Kbps.")
                 return true
             }
         logMessage("Failed to prepare encoders.")
@@ -208,29 +227,29 @@ class MainActivity : ComponentActivity(), ConnectChecker {
 
     override fun onConnectionFailed(reason: String) {
         logMessage("Connection failed: $reason")
-        Thread {
+        lifecycleScope.launch(Dispatchers.IO) {
             srtCamera2?.stopStream()
-            runOnUiThread {
+            withContext(Dispatchers.Main) {
                 isStreamingState.value = false
                 encodersReady = false
                 startCameraPreview()
                 Toast.makeText(this@MainActivity, "Connection Failed: $reason", Toast.LENGTH_LONG).show()
             }
-        }.start()
+        }
     }
 
     override fun onNewBitrate(bitrate: Long) {}
 
     override fun onDisconnect() {
         logMessage("Disconnected from server.")
-        Thread {
+        lifecycleScope.launch(Dispatchers.IO) {
             srtCamera2?.stopStream()
-            runOnUiThread {
+            withContext(Dispatchers.Main) {
                 isStreamingState.value = false
                 encodersReady = false
                 startCameraPreview()
             }
-        }.start()
+        }
     }
 
     override fun onAuthError() { logMessage("Authentication error.") }
@@ -243,12 +262,13 @@ class MainActivity : ComponentActivity(), ConnectChecker {
             logMessage("Stopping stream...")
             isStreamingState.value = false
             encodersReady = false
-            Thread {
+            // Use lifecycleScope so stopStream() runs on IO without racing lifecycle callbacks
+            lifecycleScope.launch(Dispatchers.IO) {
                 srtCamera2?.stopStream()
-                runOnUiThread {
+                withContext(Dispatchers.Main) {
                     startCameraPreview()
                 }
-            }.start()
+            }
             return
         }
 
@@ -267,9 +287,15 @@ class MainActivity : ComponentActivity(), ConnectChecker {
             logMessage("Error: Missing IP or Display Name"); return
         }
 
-        val srtUrl = "srt://$ip:$port/publish:$sanitizedName?latency=120000"
+        // RootEncoder (pedroSG94) expects the SRT stream ID as a URL path segment,
+        // NOT as a `streamid=` query parameter. The correct format is:
+        //   srt://ip:port/publish:name?latency=...
+        // Do NOT change this to query-parameter style — it will produce
+        // "endpoint malformed" errors at connection time.
+        val srtUrl = "srt://${ip}:${port}/publish:${sanitizedName}?latency=120000"
         logMessage("Connecting to $srtUrl")
-        isStreamingState.value = true
+        // Do NOT set isStreamingState=true here — wait for onConnectionSuccess() so
+        // the UI never shows LIVE while still connecting or after a failed attempt.
         srtCamera2?.startStream(srtUrl)
     }
 
@@ -292,6 +318,18 @@ class MainActivity : ComponentActivity(), ConnectChecker {
             srtCamera2?.enableAudio()
             isAudioEnabledState.value = true
             logMessage("Audio input unmuted")
+        }
+    }
+
+    private fun toggleOrientation() {
+        if (isPortraitState.value) {
+            isPortraitState.value = false
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            logMessage("Orientation: landscape")
+        } else {
+            isPortraitState.value = true
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+            logMessage("Orientation: portrait")
         }
     }
 
@@ -442,26 +480,40 @@ class MainActivity : ComponentActivity(), ConnectChecker {
         var ip by rememberSaveable { mutableStateOf("192.168.1.100") }
         var port by rememberSaveable { mutableStateOf("9000") }
         var name by rememberSaveable { mutableStateOf("Default") }
-        var selectedProfile by rememberSaveable { mutableStateOf(
-            if (videoWidth == 1280) "High" else if (videoWidth == 854) "Medium" else "Low"
-        ) }
+        var selectedProfile by rememberSaveable { mutableStateOf(activeProfile.value) }
+
+        // Keep the Activity-level activeProfile (read by prepareEncoders) in sync with
+        // the Compose state. LaunchedEffect re-runs on every selectedProfile change,
+        // including after Activity recreation when rememberSaveable restores the value.
+        LaunchedEffect(selectedProfile) {
+            activeProfile.value = selectedProfile
+        }
 
         var showConfigDialog by remember { mutableStateOf(false) }
         var showLogsDialog by remember { mutableStateOf(false) }
 
         val isStreaming by isStreamingState
         val isAudioEnabled by isAudioEnabledState
+        val allowVertical by allowVerticalState
 
         val configuration = LocalConfiguration.current
         val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
 
         Box(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(allowVertical) {
+                    // Only capture double-taps when the user has enabled vertical mode.
+                    // The key `allowVertical` restarts this block when the toggle changes.
+                    if (allowVertical) {
+                        detectTapGestures(onDoubleTap = { toggleOrientation() })
+                    }
+                },
             contentAlignment = Alignment.Center
         ) {
             // Fullscreen OpenGL preview
             AndroidView(
-                factory = { openGlView!! },
+                factory = { openGlView ?: error("OpenGlView not initialized") },
                 modifier = Modifier.fillMaxSize()
             )
 
@@ -628,9 +680,31 @@ class MainActivity : ComponentActivity(), ConnectChecker {
         if (showConfigDialog) {
             AlertDialog(
                 onDismissRequest = { showConfigDialog = false },
-                title = { Text("Connection Settings", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold) },
+                properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
+                modifier = Modifier.fillMaxWidth(0.9f),
+                title = {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Connection Settings", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                        Button(
+                            onClick = { showConfigDialog = false },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.primary,
+                                contentColor = Color(0xFF11111B)
+                            ),
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 0.dp),
+                            modifier = Modifier.height(32.dp)
+                        ) {
+                            Text("Done", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        }
+                    }
+                },
                 text = {
                     Column(
+                        modifier = Modifier.verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         OutlinedTextField(
@@ -683,28 +757,13 @@ class MainActivity : ComponentActivity(), ConnectChecker {
                                 val containerColor = if (isSelected) MaterialTheme.colorScheme.primary else Color(0xFF313244)
                                 val contentColor = if (isSelected) Color(0xFF11111B) else Color(0xFFCDD6F4)
                                 Button(
-                                    onClick = { 
+                                    onClick = {
                                         if (!isStreaming) {
                                             selectedProfile = profile
-                                            when (profile) {
-                                                "High" -> {
-                                                    videoWidth = 1280
-                                                    videoHeight = 720
-                                                    videoBitrate = 2000 * 1024
-                                                }
-                                                "Medium" -> {
-                                                    videoWidth = 854
-                                                    videoHeight = 480
-                                                    videoBitrate = 1000 * 1024
-                                                }
-                                                "Low" -> {
-                                                    videoWidth = 640
-                                                    videoHeight = 360
-                                                    videoBitrate = 500 * 1024
-                                                }
-                                            }
+                                            // activeProfile is synced via LaunchedEffect(selectedProfile)
                                             encodersReady = false
-                                            logMessage("Selected profile: $profile (${videoWidth}x${videoHeight}, ${videoBitrate / 1024} Kbps)")
+                                            val (w, h, br) = dimensionsForProfile(profile)
+                                            logMessage("Selected profile: $profile (${w}x${h}, ${br / 1024} Kbps)")
                                         }
                                     },
                                     colors = ButtonDefaults.buttonColors(
@@ -719,19 +778,52 @@ class MainActivity : ComponentActivity(), ConnectChecker {
                                 }
                             }
                         }
-                    }
-                },
-                confirmButton = {
-                    Button(
-                        onClick = { showConfigDialog = false },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.primary,
-                            contentColor = Color(0xFF11111B)
+
+                        Spacer(modifier = Modifier.height(4.dp))
+                        HorizontalDivider(color = Color(0xFF45475A), thickness = 1.dp)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "Display Orientation",
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
                         )
-                    ) {
-                        Text("Done", fontWeight = FontWeight.Bold)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column {
+                                Text(
+                                    "Allow Vertical Mode",
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    fontSize = 13.sp
+                                )
+                                Text(
+                                    "Double-tap preview to rotate",
+                                    color = Color(0xFF7F849C),
+                                    fontSize = 11.sp
+                                )
+                            }
+                            Switch(
+                                checked = allowVertical,
+                                onCheckedChange = { enabled ->
+                                    allowVerticalState.value = enabled
+                                    if (!enabled) {
+                                        // Snap back to landscape when vertical is disabled
+                                        isPortraitState.value = false
+                                        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                                    }
+                                },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = MaterialTheme.colorScheme.primary,
+                                    checkedTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                                )
+                            )
+                        }
                     }
                 },
+                confirmButton = {},
                 containerColor = MaterialTheme.colorScheme.surface,
                 shape = RoundedCornerShape(16.dp)
             )
