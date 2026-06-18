@@ -23,6 +23,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.meeting.srt.ConnectionQuality
 import com.meeting.srt.StreamState
 import com.pedro.library.view.OpenGlView
 
@@ -35,6 +36,7 @@ fun MainScreen(
     latencyMs: Int,
     latencyAuto: Boolean,
     streamState: StreamState,
+    connectionQuality: ConnectionQuality,
     isAudioEnabled: Boolean,
     allowVertical: Boolean,
     logs: List<String>,
@@ -111,6 +113,16 @@ fun MainScreen(
                 fontWeight = FontWeight.Bold,
                 fontFamily = FontFamily.Monospace
             )
+            if (isStreaming) {
+                val qualityColor = when (connectionQuality) {
+                    ConnectionQuality.Good -> Color(0xFFA6E3A1)
+                    ConnectionQuality.Fair -> Color(0xFFE5C890)
+                    ConnectionQuality.Poor -> Color(0xFFE24B4A)
+                }
+                Box(
+                    modifier = Modifier.size(6.dp).clip(CircleShape).background(qualityColor)
+                )
+            }
         }
 
         // Stream URL info (Top End)

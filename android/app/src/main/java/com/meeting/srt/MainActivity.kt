@@ -24,6 +24,7 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
@@ -43,6 +44,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
     val logs = mutableStateListOf<String>()
     val allowVerticalState = mutableStateOf(false)
     val isPortraitState = mutableStateOf(false)
+    val connectionQuality = mutableStateOf(ConnectionQuality.Good)
 
     // ── Connection / form state (survives recomposition) ────────────────
     private var ip by mutableStateOf("192.168.1.100")
@@ -61,6 +63,11 @@ class MainActivity : ComponentActivity(), ConnectChecker {
     // ── Reconnection infrastructure ────────────────────────────────────
     private var reconnectJob: Job? = null
     @Volatile private var lastSrtUrl: String? = null
+
+    // ── Network quality tracking ────────────────────────────────────────
+    private var qualityPollJob: Job? = null
+    @Volatile private var lastActualBitrate = 0L
+    private fun targetBitrate(): Int = dimensionsForProfile(activeProfile.value).third
     companion object {
         private const val MAX_RECONNECT_ATTEMPTS = 5
         private const val INITIAL_BACKOFF_MS = 1000L
@@ -127,6 +134,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
                         latencyMs = latencyMs,
                         latencyAuto = latencyAuto,
                         streamState = streamState.value,
+                        connectionQuality = connectionQuality.value,
                         isAudioEnabled = isAudioEnabledState.value,
                         allowVertical = allowVerticalState.value,
                         logs = logs.toList(),
@@ -172,6 +180,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
 
     override fun onPause() {
         super.onPause()
+        stopQualityPolling()
         cancelReconnect()
         if (srtCamera2?.isStreaming == true) {
             srtCamera2?.stopStream()
@@ -245,6 +254,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
         logMessage("Connection successful!")
         runOnUiThread {
             streamState.value = StreamState.Streaming
+            startQualityPolling()
         }
     }
 
@@ -258,6 +268,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
             if (currentState is StreamState.Stopping) streamState.value = StreamState.Idle
             return
         }
+        stopQualityPolling()
         lifecycleScope.launch(Dispatchers.IO) {
             srtCamera2?.stopStream()
             withContext(Dispatchers.Main) {
@@ -268,7 +279,9 @@ class MainActivity : ComponentActivity(), ConnectChecker {
         }
     }
 
-    override fun onNewBitrate(bitrate: Long) {}
+    override fun onNewBitrate(bitrate: Long) {
+        lastActualBitrate = bitrate
+    }
 
     override fun onDisconnect() {
         logMessage("Disconnected from server.")
@@ -279,6 +292,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
             logMessage("Disconnect received (already handled by onConnectionFailed)")
             return
         }
+        stopQualityPolling()
         lifecycleScope.launch(Dispatchers.IO) {
             srtCamera2?.stopStream()
             withContext(Dispatchers.Main) {
@@ -351,6 +365,43 @@ class MainActivity : ComponentActivity(), ConnectChecker {
         reconnectJob = null
     }
 
+    // ── Network quality polling ─────────────────────────────────────────
+
+    private fun startQualityPolling() {
+        qualityPollJob?.cancel()
+        qualityPollJob = lifecycleScope.launch {
+            var prevDropped = 0L
+            var prevSent = 0L
+            while (isActive) {
+                delay(4000)
+                if (streamState.value !is StreamState.Streaming) break
+                val client = srtCamera2?.getStreamClient() ?: break
+                val congestion = client.hasCongestion(0.5f)
+                val cacheSize = client.getCacheSize()
+                val cachePct = if (cacheSize > 0) client.getItemsInCache().toFloat() / cacheSize else 0f
+                val dropped = client.getDroppedVideoFrames() + client.getDroppedAudioFrames()
+                val sent = client.getSentVideoFrames() + client.getSentAudioFrames()
+                val dropDelta = dropped - prevDropped
+                val sentDelta = sent - prevSent
+                prevDropped = dropped
+                prevSent = sent
+                val dropRate = if (sentDelta > 0) dropDelta.toFloat() / sentDelta else 0f
+                val bitrateRatio = if (targetBitrate() > 0) lastActualBitrate.toFloat() / targetBitrate() else 1f
+                connectionQuality.value = when {
+                    congestion || dropRate > 0.3f || cachePct > 0.8f || bitrateRatio < 0.3f -> ConnectionQuality.Poor
+                    dropRate > 0.05f || cachePct > 0.4f || bitrateRatio < 0.7f -> ConnectionQuality.Fair
+                    else -> ConnectionQuality.Good
+                }
+            }
+        }
+    }
+
+    private fun stopQualityPolling() {
+        qualityPollJob?.cancel()
+        qualityPollJob = null
+        connectionQuality.value = ConnectionQuality.Good
+    }
+
     // ── Stream control ─────────────────────────────────────────────────
 
     private fun toggleStream(ip: String, portString: String, name: String) {
@@ -362,6 +413,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
         }
         if (currentState is StreamState.Streaming || currentState is StreamState.Reconnecting) {
             logMessage("Stopping stream...")
+            stopQualityPolling()
             cancelReconnect()
             streamState.value = StreamState.Stopping
             lifecycleScope.launch(Dispatchers.IO) {

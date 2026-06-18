@@ -7,3 +7,5 @@ sealed class StreamState {
     object Stopping : StreamState()
     data class Reconnecting(val attempt: Int, val maxAttempts: Int) : StreamState()
 }
+
+enum class ConnectionQuality { Good, Fair, Poor }
