@@ -20,6 +20,7 @@ import com.meeting.srt.ui.MainScreen
 import com.pedro.common.ConnectChecker
 import com.pedro.library.srt.SrtCamera2
 import com.pedro.library.view.OpenGlView
+import com.pedro.library.util.SensorRotationManager
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -34,6 +35,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
 
     private var srtCamera2: SrtCamera2? = null
     private var openGlView: OpenGlView? = null
+    private var sensorRotationManager: SensorRotationManager? = null
     @Volatile private var isSurfaceReady = false
     @Volatile private var encodersReady = false
 
@@ -98,6 +100,12 @@ class MainActivity : ComponentActivity(), ConnectChecker {
         val view = OpenGlView(this)
         openGlView = view
         srtCamera2 = SrtCamera2(view, this)
+
+        sensorRotationManager = SensorRotationManager(
+            this, /* avoidDuplicated = */ true, /* followUI = */ true
+        ) { rotation, _ ->
+            srtCamera2?.glInterface?.setRotation(rotation)
+        }
 
         view.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) {
@@ -174,6 +182,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
 
     override fun onResume() {
         super.onResume()
+        sensorRotationManager?.start()
         if (hasPermissions() && srtCamera2?.isStreaming == false && srtCamera2?.isOnPreview == false) {
             startCameraPreview()
         }
@@ -181,6 +190,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
 
     override fun onPause() {
         super.onPause()
+        sensorRotationManager?.start()
         stopQualityPolling()
         cancelReconnect()
         if (srtCamera2?.isStreaming == true) {
@@ -253,6 +263,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
     override fun onConnectionSuccess() {
         logMessage("Connection successful!")
         runOnUiThread {
+            if (currentState is StreamState.Stopping || StreamState.Idle) return
             streamState.value = StreamState.Streaming
             startQualityPolling()
         }
