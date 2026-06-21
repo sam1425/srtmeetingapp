@@ -2,7 +2,6 @@
 
 #include <atomic>
 #include <condition_variable>
-#include <deque>
 #include <future>
 #include <map>
 #include <memory>
@@ -15,15 +14,14 @@
 #include <srt/srt.h>
 
 /* ---------------------------------------------------------------------------
- * PortPool – simple allocator for relay ports (10001-10100).
+ * PortPool – thread-safe allocator for relay ports.
  * -----------------------------------------------------------------------*/
 class PortPool {
 public:
-	PortPool(int base, int count);
+	PortPool(int base_port, int count);
 
 	int allocate();
 	void release(int port);
-	bool is_available(int port) const;
 
 private:
 	mutable std::mutex mutex_;
@@ -31,7 +29,7 @@ private:
 };
 
 /* ---------------------------------------------------------------------------
- * Participant – one connected SRT publisher.
+ * Participant – tracks one connected SRT publisher and its relay socket.
  * -----------------------------------------------------------------------*/
 struct Participant {
 	std::string name;
@@ -43,35 +41,36 @@ struct Participant {
 };
 
 /* ---------------------------------------------------------------------------
- * SRTBroker – listens on a single port, demuxes publishers by StreamID,
- *             relays each stream to a unique local port, and notifies the
- *             SceneManager to create OBS sources.
+ * SRTBroker – listens on a single UDP port, demuxes incoming publishers by
+ *             their SRT StreamID, and relays each stream to a unique local
+ *             port where OBS can consume it natively.
  * -----------------------------------------------------------------------*/
 class SRTBroker {
 public:
 	SRTBroker();
 	~SRTBroker();
 
-	std::vector<std::string> get_active_participant_names();
 	bool start(int port);
 	void stop();
 
+	std::vector<std::string> get_active_participant_names();
+
 private:
 	void listen_loop();
-	void handle_new_publisher(std::string username,
+	void handle_new_publisher(const std::string &username,
 				  SRTSOCKET client_sock, int latency_ms);
 	void relay_loop(std::shared_ptr<Participant> p);
 	void cleanup_participant(std::shared_ptr<Participant> p);
 
-	std::atomic<bool> running;
-	std::atomic<SRTSOCKET> listener_socket;
-	std::unique_ptr<std::thread> listener_thread;
+	std::atomic<bool> running_{false};
+	std::atomic<SRTSOCKET> listener_socket_{SRT_INVALID_SOCK};
+	std::unique_ptr<std::thread> listener_thread_;
 
-	std::mutex handler_futures_mutex;
-	std::vector<std::future<void>> handler_futures;
+	std::mutex handler_futures_mutex_;
+	std::vector<std::future<void>> handler_futures_;
 
-	std::mutex participants_mutex;
-	std::map<std::string, std::shared_ptr<Participant>> participants;
+	std::mutex participants_mutex_;
+	std::map<std::string, std::shared_ptr<Participant>> participants_;
 
 	PortPool port_pool_;
 };

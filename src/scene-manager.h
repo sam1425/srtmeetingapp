@@ -6,6 +6,14 @@
 
 #include <obs-module.h>
 
+/* ---------------------------------------------------------------------------
+ * SceneManager – manages OBS scenes and participant sources.
+ *
+ * When a participant connects, the broker calls add_participant() which
+ * queues an OBS task to create an ffmpeg_source with an SRT URL pointing
+ * at the relay port.  When they disconnect, remove_participant() tears it
+ * down.  All OBS calls are queued to the UI thread for thread safety.
+ * -----------------------------------------------------------------------*/
 class SceneManager {
 public:
 	SceneManager();

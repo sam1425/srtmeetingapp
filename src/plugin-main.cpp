@@ -1,34 +1,30 @@
-#include <obs-module.h>
 #include <obs-frontend-api.h>
+#include <obs-module.h>
 #include <plugin-support.h>
 
-#include "srt-broker.h"
 #include "plugin-dock.h"
 #include "scene-manager.h"
+#include "srt-broker.h"
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
 
 static constexpr int BROKER_PORT = 9000;
 
-static void obssrt_frontend_event(enum obs_frontend_event event,
-				  void *private_data)
+static void on_frontend_event(enum obs_frontend_event event, void *)
 {
-	if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
+	if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING)
 		setup_plugin_dock(BROKER_PORT);
-	}
-	(void)private_data;
 }
 
 bool obs_module_load(void)
 {
-	obs_log(LOG_INFO, "SRT Meeting plugin loaded successfully (version %s)",
-		PLUGIN_VERSION);
+	obs_log(LOG_INFO, "SRT Meeting plugin v%s loaded", PLUGIN_VERSION);
 
-	obs_frontend_add_event_callback(obssrt_frontend_event, nullptr);
+	obs_frontend_add_event_callback(on_frontend_event, nullptr);
 
 	if (!s_broker.start(BROKER_PORT)) {
-		obs_log(LOG_ERROR, "Failed to start SRT broker");
+		obs_log(LOG_ERROR, "Broker failed to start");
 		return false;
 	}
 
@@ -37,11 +33,10 @@ bool obs_module_load(void)
 
 void obs_module_unload(void)
 {
-	obs_frontend_remove_event_callback(obssrt_frontend_event, nullptr);
+	obs_frontend_remove_event_callback(on_frontend_event, nullptr);
 
 	s_broker.stop();
-
-	release_scene_source();
+	s_scene_manager.shutdown();
 
 	if (s_dock_widget) {
 		obs_frontend_remove_dock("srtMeetingControlDock");
