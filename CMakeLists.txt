@@ -25,12 +25,7 @@ endif()
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE ${SRT_LIBRARIES})
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ${SRT_INCLUDE_DIRS})
 
-pkg_check_modules(FFMPEG REQUIRED libavformat libavcodec libavutil libswscale libswresample)
-target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE ${FFMPEG_LIBRARIES})
-target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ${FFMPEG_INCLUDE_DIRS})
-if(FFMPEG_LIBRARY_DIRS)
-  target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE ${FFMPEG_LIBRARY_DIRS})
-endif()
+
 
 if(WIN32)
   target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE ws2_32)
@@ -54,7 +49,7 @@ if(ENABLE_QT)
   )
 endif()
 
-target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/plugin-main.cpp src/srt-broker.cpp src/plugin-dock.cpp src/srt-source.cpp)
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/plugin-main.cpp src/srt-broker.cpp src/plugin-dock.cpp src/scene-manager.cpp)
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
 

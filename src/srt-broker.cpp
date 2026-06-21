@@ -2,8 +2,7 @@
 #include <plugin-support.h>
 
 #include "srt-broker.h"
-#include "plugin-dock.h"
-#include "srt-source.h"
+#include "scene-manager.h"
 
 #include <sstream>
 #include <cctype>
@@ -19,8 +18,6 @@
 #endif
 
 SRTBroker s_broker;
-std::atomic<bool> s_automatic_mode{true};
-std::atomic<int> s_default_latency_ms{120};
 
 static void close_srt_socket_once(std::atomic<SRTSOCKET> &sock)
 {
@@ -31,56 +28,46 @@ static void close_srt_socket_once(std::atomic<SRTSOCKET> &sock)
 }
 
 /* ---------------------------------------------------------------------------
- * PacketBuffer Implementation
+ * PortPool Implementation
  * -----------------------------------------------------------------------*/
 
-void PacketBuffer::push(const uint8_t *data, int size)
+PortPool::PortPool(int base, int count)
+{
+	for (int i = 0; i < count; ++i) {
+		available_.insert(base + i);
+	}
+}
+
+int PortPool::allocate()
 {
 	std::lock_guard<std::mutex> lock(mutex_);
-	if (packets_.size() >= MAX_PACKETS) {
-		packets_.pop_front();
-	}
-	packets_.push_back(std::vector<uint8_t>(data, data + size));
-	cv_.notify_one();
+	if (available_.empty())
+		return -1;
+	int port = *available_.begin();
+	available_.erase(available_.begin());
+	return port;
 }
 
-std::vector<uint8_t> PacketBuffer::pop(int timeout_ms)
-{
-	std::unique_lock<std::mutex> lock(mutex_);
-	if (packets_.empty() && !eof_) {
-		cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms));
-	}
-	if (!packets_.empty()) {
-		std::vector<uint8_t> pkt = std::move(packets_.front());
-		packets_.pop_front();
-		return pkt;
-	}
-	return std::vector<uint8_t>();
-}
-
-void PacketBuffer::signal_eof()
-{
-	eof_ = true;
-	cv_.notify_all();
-}
-
-bool PacketBuffer::is_eof() const
-{
-	return eof_.load();
-}
-
-void PacketBuffer::reset()
+void PortPool::release(int port)
 {
 	std::lock_guard<std::mutex> lock(mutex_);
-	packets_.clear();
-	eof_ = false;
+	available_.insert(port);
+}
+
+bool PortPool::is_available(int port) const
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	return available_.count(port) > 0;
 }
 
 /* ---------------------------------------------------------------------------
  * SRTBroker Implementation
  * -----------------------------------------------------------------------*/
 
-SRTBroker::SRTBroker() : running(false), listener_socket(SRT_INVALID_SOCK) {}
+SRTBroker::SRTBroker()
+	: running(false), listener_socket(SRT_INVALID_SOCK), port_pool_(10001, 100)
+{
+}
 
 SRTBroker::~SRTBroker()
 {
@@ -330,38 +317,55 @@ void SRTBroker::handle_new_publisher(std::string username,
 				username.c_str());
 			old_p->active = false;
 			close_srt_socket_once(old_p->client_socket);
-			old_p->buffer->signal_eof();
-			unregister_participant_buffer(username);
+			close_srt_socket_once(old_p->relay_socket);
+			if (old_p->relay_port >= 0) {
+				port_pool_.release(old_p->relay_port);
+			}
+			s_scene_manager.remove_participant(username);
+			if (old_p->relay_thread &&
+			    old_p->relay_thread->joinable()) {
+				if (old_p->relay_thread->get_id() !=
+				    std::this_thread::get_id()) {
+					old_p->relay_thread->join();
+				} else {
+					old_p->relay_thread->detach();
+				}
+			}
+		}
+
+		int relay_port = port_pool_.allocate();
+		if (relay_port < 0) {
+			obs_log(LOG_ERROR,
+				"No available relay ports for participant %s",
+				username.c_str());
+			srt_close(client_sock);
+			return;
 		}
 
 		auto participant = std::make_shared<Participant>();
 		participant->name = username;
 		participant->client_socket.store(client_sock);
-		participant->buffer = std::make_shared<PacketBuffer>();
-		participant->buffer->reset();
+		participant->relay_port = relay_port;
+		participant->active = true;
 
 		{
 			std::lock_guard<std::mutex> lock(participants_mutex);
 			participants[username] = participant;
 		}
 
-		obs_log(LOG_INFO, "Registered participant: %s, setting up PacketBuffer",
-			username.c_str());
+		obs_log(LOG_INFO,
+			"Registered participant: %s, assigned relay port %d",
+			username.c_str(), relay_port);
 
-		register_participant_buffer(username, participant->buffer);
-
-		// Set SRT latency
 		int final_latency_ms =
-			latency_ms > 0 ? latency_ms : s_default_latency_ms.load();
-		srt_setsockopt(client_sock, 0, SRTO_RCVLATENCY, &final_latency_ms,
-			       sizeof(final_latency_ms));
+			latency_ms > 0 ? latency_ms : 120;
+		srt_setsockopt(client_sock, 0, SRTO_RCVLATENCY,
+			       &final_latency_ms, sizeof(final_latency_ms));
 
-		update_participants_list_ui();
+		s_scene_manager.add_participant(username, relay_port);
 
-		create_obs_srt_source(username, participant->buffer);
-
-		participant->receive_thread = std::make_unique<std::thread>(
-			&SRTBroker::receive_loop, this, participant);
+		participant->relay_thread = std::make_unique<std::thread>(
+			&SRTBroker::relay_loop, this, participant);
 
 	} catch (const std::exception &e) {
 		obs_log(LOG_ERROR, "Exception in handle_new_publisher: %s",
@@ -373,32 +377,107 @@ void SRTBroker::handle_new_publisher(std::string username,
 	}
 }
 
-	void SRTBroker::receive_loop(std::shared_ptr<Participant> p)
+void SRTBroker::relay_loop(std::shared_ptr<Participant> p)
 {
 	try {
+		SRTSOCKET relay_listener = srt_create_socket();
+		if (relay_listener == SRT_INVALID_SOCK) {
+			obs_log(LOG_ERROR,
+				"Failed to create relay socket for %s: %s",
+				p->name.c_str(), srt_getlasterror_str());
+			cleanup_participant(p);
+			return;
+		}
+
+		int yes = 1;
+		srt_setsockopt(relay_listener, 0, SRTO_REUSEADDR, &yes,
+			       sizeof(yes));
+
+		sockaddr_in sa;
+		memset(&sa, 0, sizeof(sa));
+		sa.sin_family = AF_INET;
+		sa.sin_port = htons(p->relay_port);
+		sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+		if (srt_bind(relay_listener, (struct sockaddr *)&sa,
+			     sizeof(sa)) == SRT_ERROR) {
+			obs_log(LOG_ERROR,
+				"Failed to bind relay socket to port %d for %s: %s",
+				p->relay_port, p->name.c_str(),
+				srt_getlasterror_str());
+			srt_close(relay_listener);
+			cleanup_participant(p);
+			return;
+		}
+
+		if (srt_listen(relay_listener, 1) == SRT_ERROR) {
+			obs_log(LOG_ERROR,
+				"Failed to listen on relay port %d for %s: %s",
+				p->relay_port, p->name.c_str(),
+				srt_getlasterror_str());
+			srt_close(relay_listener);
+			cleanup_participant(p);
+			return;
+		}
+
+		p->relay_socket.store(relay_listener);
+
+		obs_log(LOG_INFO,
+			"Relay listener ready on port %d for %s, waiting for OBS...",
+			p->relay_port, p->name.c_str());
+
+		sockaddr_in obs_addr;
+		int obs_addr_len = sizeof(obs_addr);
+		int accept_timeout_ms = 10000;
+		srt_setsockopt(relay_listener, 0, SRTO_RCVTIMEO,
+			       &accept_timeout_ms, sizeof(accept_timeout_ms));
+
+		SRTSOCKET obs_sock =
+			srt_accept(relay_listener,
+				   (struct sockaddr *)&obs_addr,
+				   &obs_addr_len);
+
+		if (obs_sock == SRT_INVALID_SOCK) {
+			if (running && p->active) {
+				obs_log(LOG_WARNING,
+					"OBS did not connect to relay port %d for %s within timeout",
+					p->relay_port, p->name.c_str());
+			}
+			srt_close(relay_listener);
+			p->relay_socket.store(SRT_INVALID_SOCK);
+			cleanup_participant(p);
+			return;
+		}
+
+		obs_log(LOG_INFO,
+			"OBS connected to relay port %d for %s, starting relay",
+			p->relay_port, p->name.c_str());
+
 		constexpr int RECV_BUFFER_SIZE = 1316 * 16;
 		std::vector<uint8_t> buffer(RECV_BUFFER_SIZE);
-		obs_log(LOG_INFO, "Starting SRT receive loop for %s (buffer=%d bytes)",
-			p->name.c_str(), RECV_BUFFER_SIZE);
 
-		int timeout_ms = 500;
+		int client_timeout_ms = 500;
 		SRTSOCKET cs = p->client_socket.load();
 		if (cs != SRT_INVALID_SOCK) {
-			srt_setsockopt(cs, 0, SRTO_RCVTIMEO, &timeout_ms,
-				       sizeof(timeout_ms));
+			srt_setsockopt(cs, 0, SRTO_RCVTIMEO,
+				       &client_timeout_ms,
+				       sizeof(client_timeout_ms));
 		}
 
 		while (running && p->active) {
 			SRTSOCKET recv_sock = p->client_socket.load();
 			if (recv_sock == SRT_INVALID_SOCK) {
 				obs_log(LOG_INFO,
-					"Client socket gone for %s, exiting receive loop",
+					"Client socket gone for %s, stopping relay",
 					p->name.c_str());
 				break;
 			}
 
-			int bytes_read =
-				srt_recvmsg(recv_sock, reinterpret_cast<char*>(buffer.data()), buffer.size());
+			int bytes_read = srt_recvmsg(
+				recv_sock,
+				reinterpret_cast<char *>(buffer.data()),
+				buffer.size());
+
 			if (bytes_read == SRT_ERROR) {
 				int err = srt_getlasterror(NULL);
 				if (err == SRT_EASYNCRCV ||
@@ -419,21 +498,34 @@ void SRTBroker::handle_new_publisher(std::string username,
 				break;
 			}
 
-			if (bytes_read > 0) {
-				p->buffer->push(buffer.data(), bytes_read);
-				obs_log(LOG_DEBUG, "Pushed %d bytes to buffer for %s", bytes_read, p->name.c_str());
+			int sent = srt_sendmsg(
+				obs_sock,
+				reinterpret_cast<const char *>(
+					buffer.data()),
+				bytes_read, -1, true);
+
+			if (sent == SRT_ERROR) {
+				obs_log(LOG_INFO,
+					"Relay send error for %s (OBS disconnected): %s",
+					p->name.c_str(),
+					srt_getlasterror_str());
+				break;
 			}
 		}
 
-		obs_log(LOG_INFO, "Stopping SRT receive loop for %s",
-			p->name.c_str());
+		srt_close(obs_sock);
+		srt_close(relay_listener);
+		p->relay_socket.store(SRT_INVALID_SOCK);
+
+		obs_log(LOG_INFO, "Relay stopped for %s", p->name.c_str());
 		cleanup_participant(p);
+
 	} catch (const std::exception &e) {
-		obs_log(LOG_ERROR, "Exception in receive_loop for %s: %s",
+		obs_log(LOG_ERROR, "Exception in relay_loop for %s: %s",
 			p->name.c_str(), e.what());
 		cleanup_participant(p);
 	} catch (...) {
-		obs_log(LOG_ERROR, "Unknown exception in receive_loop for %s",
+		obs_log(LOG_ERROR, "Unknown exception in relay_loop for %s",
 			p->name.c_str());
 		cleanup_participant(p);
 	}
@@ -456,24 +548,27 @@ void SRTBroker::cleanup_participant(std::shared_ptr<Participant> p)
 
 	p->active = false;
 	close_srt_socket_once(p->client_socket);
-	p->buffer->signal_eof();
-	unregister_participant_buffer(p->name);
+	close_srt_socket_once(p->relay_socket);
 
-	if (p->receive_thread) {
-		if (p->receive_thread->get_id() == std::this_thread::get_id()) {
-			p->receive_thread->detach();
-		} else if (p->receive_thread->joinable()) {
-			p->receive_thread->join();
+	if (p->relay_port >= 0) {
+		port_pool_.release(p->relay_port);
+		p->relay_port = -1;
+	}
+
+	if (p->relay_thread) {
+		if (p->relay_thread->get_id() == std::this_thread::get_id()) {
+			p->relay_thread->detach();
+		} else if (p->relay_thread->joinable()) {
+			p->relay_thread->join();
 		}
 	}
 
 	if (was_in_map) {
-		update_participants_list_ui();
-		if (s_automatic_mode.load()) {
-			remove_obs_srt_source(p->name);
+		if (s_scene_manager.is_automatic_mode()) {
+			s_scene_manager.remove_participant(p->name);
 		} else {
 			obs_log(LOG_INFO,
-				"Static mode enabled: Keeping source 'SRT - %s' on disconnect",
+				"Static mode: Keeping source 'SRT - %s' on disconnect",
 				p->name.c_str());
 		}
 	}
