@@ -4,6 +4,7 @@
 
 #include "plugin-dock.h"
 #include "srt-broker.h"
+#include "srt-source.h"
 
 #include <string>
 #include <cstring>
@@ -23,6 +24,11 @@ QDockWidget *s_dock_widget{nullptr};
 QComboBox *s_scene_selector{nullptr};
 
 static obs_source_t *s_scene_source{nullptr};
+
+struct SourceTaskData {
+	std::string name;
+	std::shared_ptr<PacketBuffer> buffer;
+};
 
 static obs_scene_t *find_or_create_target_scene()
 {
@@ -74,21 +80,10 @@ static obs_scene_t *find_or_create_target_scene()
 
 static void create_obs_srt_source_task(void *param)
 {
-	auto *data = static_cast<TaskData *>(param);
+	auto *data = static_cast<SourceTaskData *>(param);
 
 	obs_data_t *settings = obs_data_create();
-
-	std::string srt_url = "srt://127.0.0.1:" + std::to_string(data->port) +
-			      "?mode=caller&latency=" +
-			      std::to_string(data->latency_ms * 1000);
-	obs_data_set_string(settings, "input", srt_url.c_str());
-	obs_data_set_bool(settings, "is_local_file", false);
-	obs_data_set_string(settings, "input_format", "mpegts");
-	obs_data_set_bool(settings, "looping", false);
-	obs_data_set_bool(settings, "hw_decode", true);
-	obs_data_set_int(settings, "buffering_mb", 1);
-	obs_data_set_bool(settings, "close_when_inactive", false);
-	obs_data_set_bool(settings, "restart_on_active", false);
+	obs_data_set_string(settings, "participant_name", data->name.c_str());
 
 	obs_scene_t *scene = find_or_create_target_scene();
 	if (scene) {
@@ -98,15 +93,18 @@ static void create_obs_srt_source_task(void *param)
 			obs_get_source_by_name(source_name.c_str());
 		if (existing_source) {
 			obs_log(LOG_INFO,
-				"Source '%s' already exists in OBS, updating settings with new port %d",
-				source_name.c_str(), data->port);
+				"Source '%s' already exists in OBS, updating settings",
+				source_name.c_str());
 			obs_source_update(existing_source, settings);
 			obs_source_release(existing_source);
 		} else {
 			obs_source_t *srt_source = obs_source_create(
-				"ffmpeg_source", source_name.c_str(), settings,
+				"srt_participant", source_name.c_str(), settings,
 				nullptr);
 			if (srt_source) {
+				// Prevent OBS from deactivating this source on scene switch
+				obs_source_inc_active(srt_source);
+
 				obs_sceneitem_t *scene_item =
 					obs_scene_add(scene, srt_source);
 				if (scene_item) {
@@ -142,6 +140,7 @@ static void remove_obs_srt_source_task(void *param)
 	obs_source_t *source =
 		obs_get_source_by_name(source_name.c_str());
 	if (source) {
+		obs_source_dec_active(source); // Match the inc_active
 		obs_source_remove(source);
 		obs_source_release(source);
 		obs_log(LOG_INFO, "Removed SRT source '%s' from OBS",
@@ -360,9 +359,9 @@ void setup_plugin_dock(int broker_port)
 	obs_log(LOG_INFO, "SRT Meeting UI dock registered successfully");
 }
 
-void create_obs_srt_source(const std::string &name, int port, int latency_ms)
+void create_obs_srt_source(const std::string &name, std::shared_ptr<PacketBuffer> buffer)
 {
-	auto *data = new TaskData{name, port, latency_ms};
+	auto *data = new SourceTaskData{name, buffer};
 	obs_queue_task(OBS_TASK_UI, create_obs_srt_source_task, data, false);
 }
 

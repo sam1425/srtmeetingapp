@@ -21,6 +21,7 @@ import com.pedro.common.ConnectChecker
 import com.pedro.library.srt.SrtCamera2
 import com.pedro.library.view.OpenGlView
 import com.pedro.library.util.SensorRotationManager
+import com.pedro.encoder.input.video.CameraHelper
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -38,6 +39,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
     private var sensorRotationManager: SensorRotationManager? = null
     @Volatile private var isSurfaceReady = false
     @Volatile private var encodersReady = false
+    private var isFrontCamera = false
 
     // ── Reactive state ──────────────────────────────────────────────────
     private val activeProfile = mutableStateOf("High")
@@ -190,7 +192,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
 
     override fun onPause() {
         super.onPause()
-        sensorRotationManager?.start()
+        sensorRotationManager?.stop()
         stopQualityPolling()
         cancelReconnect()
         if (srtCamera2?.isStreaming == true) {
@@ -238,8 +240,13 @@ class MainActivity : ComponentActivity(), ConnectChecker {
         if (srtCamera2?.isOnPreview == true) return
         try {
             encodersReady = prepareEncoders()
-            srtCamera2?.startPreview()
-            logMessage("Camera preview started.")
+            val facing = if (isFrontCamera) {
+                CameraHelper.Facing.FRONT
+            } else {
+                CameraHelper.Facing.BACK
+            }
+            srtCamera2?.startPreview(facing)
+            logMessage("Camera preview started (facing: $facing).")
         } catch (e: Exception) {
             logMessage("Failed to start preview: ${e.message}")
         }
@@ -263,7 +270,7 @@ class MainActivity : ComponentActivity(), ConnectChecker {
     override fun onConnectionSuccess() {
         logMessage("Connection successful!")
         runOnUiThread {
-            if (currentState is StreamState.Stopping || StreamState.Idle) return
+            // if (currentState is StreamState.Stopping || StreamState.Idle) return
             streamState.value = StreamState.Streaming
             startQualityPolling()
         }
@@ -284,6 +291,15 @@ class MainActivity : ComponentActivity(), ConnectChecker {
             srtCamera2?.stopStream()
             withContext(Dispatchers.Main) {
                 encodersReady = false
+                val activeFront = srtCamera2?.isFrontCamera ?: false
+                if (activeFront != isFrontCamera) {
+                    logMessage("Restoring camera facing to ${if (isFrontCamera) "FRONT" else "BACK"}...")
+                    try {
+                        srtCamera2?.switchCamera()
+                    } catch (e: Exception) {
+                        logMessage("Error restoring camera facing: ${e.message}")
+                    }
+                }
                 Toast.makeText(this@MainActivity, "Connection Failed: $reason", Toast.LENGTH_SHORT).show()
                 startReconnect()
             }
@@ -308,6 +324,15 @@ class MainActivity : ComponentActivity(), ConnectChecker {
             srtCamera2?.stopStream()
             withContext(Dispatchers.Main) {
                 encodersReady = false
+                val activeFront = srtCamera2?.isFrontCamera ?: false
+                if (activeFront != isFrontCamera) {
+                    logMessage("Restoring camera facing to ${if (isFrontCamera) "FRONT" else "BACK"}...")
+                    try {
+                        srtCamera2?.switchCamera()
+                    } catch (e: Exception) {
+                        logMessage("Error restoring camera facing: ${e.message}")
+                    }
+                }
                 startReconnect()
             }
         }
@@ -432,6 +457,15 @@ class MainActivity : ComponentActivity(), ConnectChecker {
                 withContext(Dispatchers.Main) {
                     streamState.value = StreamState.Idle
                     encodersReady = false
+                    val activeFront = srtCamera2?.isFrontCamera ?: false
+                    if (activeFront != isFrontCamera) {
+                        logMessage("Restoring camera facing to ${if (isFrontCamera) "FRONT" else "BACK"}...")
+                        try {
+                            srtCamera2?.switchCamera()
+                        } catch (e: Exception) {
+                            logMessage("Error restoring camera facing: ${e.message}")
+                        }
+                    }
                 }
             }
             return
@@ -444,15 +478,16 @@ class MainActivity : ComponentActivity(), ConnectChecker {
                 return
             }
         }
+
         val portInt = portString.toIntOrNull() ?: 9000
         val sanitizedName = name.trim().replace(" ", "_").filter { it.isLetterOrDigit() || it == '_' }
         if (ip.isBlank() || sanitizedName.isBlank()) {
             logMessage("Error: Missing IP or Display Name"); return
         }
 
-        val latencyParam = if (latencyAuto) "auto" else "${latencyMs * 1000}"
-        val srtUrl = "srt://${ip}:${portInt}/publish:${sanitizedName}?latency=${latencyParam}"
-        lastSrtUrl = srtUrl
+		val latencyParam = if (latencyAuto) "auto" else "${latencyMs * 1000}"
+		val srtUrl = "srt://${ip}:${portInt}/publish:${sanitizedName}?latency=${latencyParam}"
+		lastSrtUrl = srtUrl
         logMessage("Connecting to $srtUrl")
         streamState.value = StreamState.Connecting
         lifecycleScope.launch(Dispatchers.IO) {
@@ -473,7 +508,8 @@ class MainActivity : ComponentActivity(), ConnectChecker {
     private fun switchCamera() {
         try {
             srtCamera2?.switchCamera()
-            logMessage("Switched camera")
+            isFrontCamera = srtCamera2?.isFrontCamera ?: false
+            logMessage("Switched camera. isFrontCamera=$isFrontCamera")
         } catch (e: Exception) {
             logMessage("Error switching camera: ${e.message}")
         }

@@ -1,27 +1,59 @@
 #pragma once
 
 #include <atomic>
-#include <memory>
+#include <condition_variable>
+#include <deque>
+#include <future>
 #include <map>
+#include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
-#include <future>
 #include <vector>
-#include <set>
 
 #include <srt/srt.h>
 
+/* ---------------------------------------------------------------------------
+ * PacketBuffer – thread-safe ring buffer for MPEG-TS packets.
+ *
+ * Written by the broker's receive thread, read by the custom OBS source's
+ * decode thread.  When full the oldest packets are silently dropped so a
+ * slow decoder never blocks the network path.
+ * -----------------------------------------------------------------------*/
+class PacketBuffer {
+public:
+	static constexpr size_t MAX_PACKETS = 2000; // ~2.6 MB at 1316 B each
+
+	void push(const uint8_t *data, int size);
+	std::vector<uint8_t> pop(int timeout_ms = 100);
+	void signal_eof();
+	bool is_eof() const;
+	void reset(); // clear buffer + reset EOF for reconnection
+
+private:
+	mutable std::mutex mutex_;
+	std::condition_variable cv_;
+	std::deque<std::vector<uint8_t>> packets_;
+	std::atomic<bool> eof_{false};
+};
+
+/* ---------------------------------------------------------------------------
+ * Participant – one connected SRT publisher.
+ * -----------------------------------------------------------------------*/
 struct Participant {
 	std::string name;
 	std::atomic<SRTSOCKET> client_socket{SRT_INVALID_SOCK};
-	std::atomic<SRTSOCKET> obs_socket{SRT_INVALID_SOCK};
-	int loopback_port{-1};
-	std::atomic<SRTSOCKET> loopback_listener{SRT_INVALID_SOCK};
-	std::unique_ptr<std::thread> relay_thread;
+	std::shared_ptr<PacketBuffer> buffer;
+	std::unique_ptr<std::thread> receive_thread;
 	std::atomic<bool> active{true};
 };
 
+/* ---------------------------------------------------------------------------
+ * SRTBroker – listens on a single port, demuxes publishers by StreamID,
+ *             and pushes their MPEG-TS data into per-participant ring
+ *             buffers.  No loopback sockets, no relay threads.
+ * -----------------------------------------------------------------------*/
 class SRTBroker {
 public:
 	SRTBroker();
@@ -33,12 +65,10 @@ public:
 
 private:
 	void listen_loop();
-	void handle_new_publisher(std::string username, SRTSOCKET client_sock,
-				  int latency_ms);
-	void relay_loop(std::shared_ptr<Participant> p);
+	void handle_new_publisher(std::string username,
+				  SRTSOCKET client_sock, int latency_ms);
+	void receive_loop(std::shared_ptr<Participant> p);
 	void cleanup_participant(std::shared_ptr<Participant> p);
-	SRTSOCKET wait_for_obs_connection(std::shared_ptr<Participant> p);
-	int find_free_loopback_port();
 
 	std::atomic<bool> running;
 	std::atomic<SRTSOCKET> listener_socket;

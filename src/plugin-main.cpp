@@ -4,6 +4,7 @@
 
 #include "srt-broker.h"
 #include "plugin-dock.h"
+#include "srt-source.h"
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
@@ -23,6 +24,8 @@ bool obs_module_load(void)
 {
 	obs_log(LOG_INFO, "SRT Meeting plugin loaded successfully (version %s)",
 		PLUGIN_VERSION);
+
+	register_srt_participant_source();
 
 	obs_frontend_add_event_callback(obssrt_frontend_event, nullptr);
 
