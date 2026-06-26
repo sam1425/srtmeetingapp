@@ -1,8 +1,6 @@
 #pragma once
 
 #include <atomic>
-#include <condition_variable>
-#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -34,10 +32,16 @@ private:
 struct Participant {
 	std::string name;
 	std::atomic<SRTSOCKET> client_socket{SRT_INVALID_SOCK};
-	std::atomic<SRTSOCKET> relay_socket{SRT_INVALID_SOCK};
+	std::atomic<SRTSOCKET> relay_listener{SRT_INVALID_SOCK};
+	std::atomic<SRTSOCKET> obs_socket{SRT_INVALID_SOCK};
+	
 	int relay_port{-1};
+	int latency_ms{0};
+	
 	std::unique_ptr<std::thread> relay_thread;
 	std::atomic<bool> active{true};
+	
+	std::atomic<int> epoll_id{-1};
 };
 
 /* ---------------------------------------------------------------------------
@@ -57,17 +61,14 @@ public:
 
 private:
 	void listen_loop();
-	void handle_new_publisher(const std::string &username,
-				  SRTSOCKET client_sock, int latency_ms);
+	void handle_new_publisher(std::string username, SRTSOCKET client_sock, int latency_ms);
 	void relay_loop(std::shared_ptr<Participant> p);
 	void cleanup_participant(std::shared_ptr<Participant> p);
 
 	std::atomic<bool> running_{false};
 	std::atomic<SRTSOCKET> listener_socket_{SRT_INVALID_SOCK};
 	std::unique_ptr<std::thread> listener_thread_;
-
-	std::mutex handler_futures_mutex_;
-	std::vector<std::future<void>> handler_futures_;
+	std::atomic<int> listener_epoll_id_{-1};
 
 	std::mutex participants_mutex_;
 	std::map<std::string, std::shared_ptr<Participant>> participants_;

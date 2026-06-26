@@ -44,6 +44,7 @@ static void add_participant_task(void *param)
 		obs_data_set_string(settings, "input", url.c_str());
 		obs_data_set_string(settings, "input_format", "mpegts");
 		obs_data_set_bool(settings, "is_local_file", false);
+		obs_data_set_bool(settings, "clear_on_media_end", false);
 		obs_source_update(existing, settings);
 		obs_data_release(settings);
 		obs_source_release(existing);
@@ -57,6 +58,7 @@ static void add_participant_task(void *param)
 	obs_data_set_string(settings, "input", url.c_str());
 	obs_data_set_string(settings, "input_format", "mpegts");
 	obs_data_set_bool(settings, "is_local_file", false);
+	obs_data_set_bool(settings, "clear_on_media_end", false);
 
 	obs_source_t *source = obs_source_create("ffmpeg_source",
 						 source_name.c_str(), settings,
